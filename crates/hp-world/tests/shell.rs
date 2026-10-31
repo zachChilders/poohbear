@@ -41,6 +41,13 @@ fn tags(h: &mut Box<dyn Host>, line: &str) -> Vec<String> {
     h.run(line).tags
 }
 
+/// Run each command and check its output: a transcript of a session.
+fn transcript(h: &mut Box<dyn Host>, cases: &[(&str, &str)]) {
+    for (cmd, want) in cases {
+        assert_eq!(&out(h, cmd), want, "$ {cmd}");
+    }
+}
+
 // ------------------------------------------------------------ identity
 
 #[test]
@@ -91,17 +98,22 @@ fn login_prints_a_banner_built_from_the_spec() {
 #[test]
 fn identity_commands() {
     let mut a = admin();
-    assert_eq!(out(&mut a, "whoami"), "admin\n");
-    assert_eq!(
-        out(&mut a, "id"),
-        "uid=1000(admin) gid=1000(admin) groups=1000(admin),20(dialout)\n"
+    transcript(
+        &mut a,
+        &[
+            ("whoami", "admin\n"),
+            (
+                "id",
+                "uid=1000(admin) gid=1000(admin) groups=1000(admin),20(dialout)\n",
+            ),
+            ("id -u", "1000\n"),
+            ("id -un", "admin\n"),
+            ("groups", "admin dialout\n"),
+            ("hostname", "plc-gw-03\n"),
+            ("hostname -I", "10.20.0.31 \n"),
+            ("cat /etc/hostname", "plc-gw-03\n"),
+        ],
     );
-    assert_eq!(out(&mut a, "id -u"), "1000\n");
-    assert_eq!(out(&mut a, "id -un"), "admin\n");
-    assert_eq!(out(&mut a, "groups"), "admin dialout\n");
-    assert_eq!(out(&mut a, "hostname"), "plc-gw-03\n");
-    assert_eq!(out(&mut a, "hostname -I"), "10.20.0.31 \n");
-    assert_eq!(out(&mut a, "cat /etc/hostname"), "plc-gw-03\n");
     let mut r = root();
     assert_eq!(
         out(&mut r, "id"),
@@ -112,15 +124,14 @@ fn identity_commands() {
 #[test]
 fn uname_in_all_its_forms() {
     let mut a = admin();
-    assert_eq!(
-        out(&mut a, "uname -a"),
-        "Linux plc-gw-03 5.15.0-91-generic #101-Ubuntu SMP Tue Nov 14 13:30:08 UTC 2023 x86_64 x86_64 x86_64 GNU/Linux\n"
-    );
-    assert_eq!(out(&mut a, "uname"), "Linux\n");
-    assert_eq!(out(&mut a, "uname -r"), "5.15.0-91-generic\n");
-    assert_eq!(out(&mut a, "uname -m"), "x86_64\n");
-    assert_eq!(out(&mut a, "uname -sr"), "Linux 5.15.0-91-generic\n");
-    assert_eq!(out(&mut a, "uname -n"), "plc-gw-03\n");
+    transcript(&mut a, &[
+        ("uname -a", "Linux plc-gw-03 5.15.0-91-generic #101-Ubuntu SMP Tue Nov 14 13:30:08 UTC 2023 x86_64 x86_64 x86_64 GNU/Linux\n"),
+        ("uname", "Linux\n"),
+        ("uname -r", "5.15.0-91-generic\n"),
+        ("uname -m", "x86_64\n"),
+        ("uname -sr", "Linux 5.15.0-91-generic\n"),
+        ("uname -n", "plc-gw-03\n"),
+    ]);
 }
 
 #[test]
@@ -133,8 +144,13 @@ fn os_files_agree_with_the_spec() {
         "{rel}"
     );
     assert!(out(&mut a, "cat /proc/version").starts_with("Linux version 5.15.0-91-generic"));
-    assert_eq!(out(&mut a, "cat /proc/cpuinfo | grep -c processor"), "2\n");
-    assert_eq!(out(&mut a, "nproc"), "2\n");
+    transcript(
+        &mut a,
+        &[
+            ("cat /proc/cpuinfo | grep -c processor", "2\n"),
+            ("nproc", "2\n"),
+        ],
+    );
     assert!(out(&mut a, "cat /proc/cpuinfo | grep 'model name'").contains("Xeon(R) CPU E5-2680 v4"));
     assert!(out(&mut a, "cat /proc/meminfo").starts_with("MemTotal:        4025016 kB"));
 }
@@ -151,17 +167,16 @@ fn cd_updates_the_prompt_and_reports_errors_like_bash() {
     assert_eq!(run(&mut a, "cd work").prompt, "admin@plc-gw-03:~/work$ ");
     assert_eq!(run(&mut a, "cd ..").prompt, "admin@plc-gw-03:~$ ");
     assert_eq!(run(&mut a, "cd -").prompt, "admin@plc-gw-03:~/work$ ");
-    assert_eq!(
-        out(&mut a, "cd /nope"),
-        "-bash: cd: /nope: No such file or directory\n"
-    );
-    assert_eq!(
-        out(&mut a, "cd /etc/passwd"),
-        "-bash: cd: /etc/passwd: Not a directory\n"
-    );
-    assert_eq!(
-        out(&mut a, "cd /root"),
-        "-bash: cd: /root: Permission denied\n"
+    transcript(
+        &mut a,
+        &[
+            ("cd /nope", "-bash: cd: /nope: No such file or directory\n"),
+            (
+                "cd /etc/passwd",
+                "-bash: cd: /etc/passwd: Not a directory\n",
+            ),
+            ("cd /root", "-bash: cd: /root: Permission denied\n"),
+        ],
     );
     assert_eq!(
         a.var("cwd").as_deref(),
@@ -178,25 +193,35 @@ fn cd_updates_the_prompt_and_reports_errors_like_bash() {
 #[test]
 fn ls_plain_long_and_hidden() {
     let mut a = admin();
-    assert_eq!(out(&mut a, "ls"), "notes.txt\n");
-    assert_eq!(
-        out(&mut a, "ls -a"),
-        ".  ..  .bash_logout  .bashrc  notes.txt  .profile\n"
+    transcript(
+        &mut a,
+        &[
+            ("ls", "notes.txt\n"),
+            (
+                "ls -a",
+                ".  ..  .bash_logout  .bashrc  notes.txt  .profile\n",
+            ),
+        ],
     );
     assert_eq!(out(&mut a, "ls -la").lines().next().unwrap(), "total 24");
-    assert_eq!(
-        out(&mut a, "ls -l"),
-        "total 4\n-rw-r--r-- 1 admin admin 72 Oct 15  2024 notes.txt\n"
+    transcript(
+        &mut a,
+        &[
+            (
+                "ls -l",
+                "total 4\n-rw-r--r-- 1 admin admin 72 Oct 15  2024 notes.txt\n",
+            ),
+            (
+                "ls /nope",
+                "ls: cannot access '/nope': No such file or directory\n",
+            ),
+            (
+                "ls /root",
+                "ls: cannot open directory '/root': Permission denied\n",
+            ),
+            ("ls /etc/hostname", "/etc/hostname\n"),
+        ],
     );
-    assert_eq!(
-        out(&mut a, "ls /nope"),
-        "ls: cannot access '/nope': No such file or directory\n"
-    );
-    assert_eq!(
-        out(&mut a, "ls /root"),
-        "ls: cannot open directory '/root': Permission denied\n"
-    );
-    assert_eq!(out(&mut a, "ls /etc/hostname"), "/etc/hostname\n");
 }
 
 #[test]
@@ -251,41 +276,31 @@ fn ls_wraps_into_columns_when_the_names_are_long() {
 fn cat_and_friends_report_errors_like_coreutils() {
     let mut a = admin();
     assert_eq!(out(&mut a, "cat notes.txt").lines().count(), 2);
-    assert_eq!(
-        out(&mut a, "cat /nope"),
-        "cat: /nope: No such file or directory\n"
-    );
-    assert_eq!(out(&mut a, "cat /etc"), "cat: /etc: Is a directory\n");
-    assert_eq!(
-        out(&mut a, "cat /etc/shadow"),
-        "cat: /etc/shadow: Permission denied\n"
-    );
-    assert_eq!(
-        out(&mut a, "cat /etc/hostname /etc/hostname"),
-        "plc-gw-03\nplc-gw-03\n"
-    );
-    assert_eq!(out(&mut a, "cat -n /etc/hostname"), "     1\tplc-gw-03\n");
-    assert_eq!(
-        out(&mut a, "head -n 1 notes.txt"),
-        "TODO: rotate historian creds\n"
-    );
-    assert_eq!(
-        out(&mut a, "head -1 notes.txt"),
-        "TODO: rotate historian creds\n"
-    );
-    assert_eq!(
-        out(&mut a, "tail -n 1 notes.txt"),
-        "plc-gw-02 firmware update scheduled for Q1\n"
-    );
-    assert_eq!(
-        out(&mut a, "head /nope"),
-        "head: cannot open '/nope' for reading: No such file or directory\n"
-    );
-    assert_eq!(out(&mut a, "wc -l notes.txt"), "      2 notes.txt\n");
-    assert_eq!(out(&mut a, "cat notes.txt | wc -l"), "2\n");
-    assert_eq!(
-        out(&mut a, "wc /etc/hostname"),
-        "      1       1      10 /etc/hostname\n"
+    transcript(
+        &mut a,
+        &[
+            ("cat /nope", "cat: /nope: No such file or directory\n"),
+            ("cat /etc", "cat: /etc: Is a directory\n"),
+            ("cat /etc/shadow", "cat: /etc/shadow: Permission denied\n"),
+            ("cat /etc/hostname /etc/hostname", "plc-gw-03\nplc-gw-03\n"),
+            ("cat -n /etc/hostname", "     1\tplc-gw-03\n"),
+            ("head -n 1 notes.txt", "TODO: rotate historian creds\n"),
+            ("head -1 notes.txt", "TODO: rotate historian creds\n"),
+            (
+                "tail -n 1 notes.txt",
+                "plc-gw-02 firmware update scheduled for Q1\n",
+            ),
+            (
+                "head /nope",
+                "head: cannot open '/nope' for reading: No such file or directory\n",
+            ),
+            ("wc -l notes.txt", "      2 notes.txt\n"),
+            ("cat notes.txt | wc -l", "2\n"),
+            (
+                "wc /etc/hostname",
+                "      1       1      10 /etc/hostname\n",
+            ),
+        ],
     );
 }
 
@@ -307,25 +322,24 @@ fn grep_in_its_common_forms() {
             .unwrap()
             > 10
     );
-    assert_eq!(
-        out(&mut a, "grep -i ROTATE notes.txt"),
-        "TODO: rotate historian creds\n"
+    transcript(
+        &mut a,
+        &[
+            ("grep -i ROTATE notes.txt", "TODO: rotate historian creds\n"),
+            (
+                "grep -v TODO notes.txt",
+                "plc-gw-02 firmware update scheduled for Q1\n",
+            ),
+            (
+                "grep -n plc notes.txt",
+                "2:plc-gw-02 firmware update scheduled for Q1\n",
+            ),
+            ("grep -o 'plc-gw-0[0-9]' notes.txt", "plc-gw-02\n"),
+            ("cat notes.txt | grep -c .", "2\n"),
+            ("grep nomatch notes.txt; echo $?", "1\n"),
+            ("grep -F 'a.b' notes.txt; echo $?", "1\n"),
+        ],
     );
-    assert_eq!(
-        out(&mut a, "grep -v TODO notes.txt"),
-        "plc-gw-02 firmware update scheduled for Q1\n"
-    );
-    assert_eq!(
-        out(&mut a, "grep -n plc notes.txt"),
-        "2:plc-gw-02 firmware update scheduled for Q1\n"
-    );
-    assert_eq!(
-        out(&mut a, "grep -o 'plc-gw-0[0-9]' notes.txt"),
-        "plc-gw-02\n"
-    );
-    assert_eq!(out(&mut a, "cat notes.txt | grep -c ."), "2\n");
-    assert_eq!(out(&mut a, "grep nomatch notes.txt; echo $?"), "1\n");
-    assert_eq!(out(&mut a, "grep -F 'a.b' notes.txt; echo $?"), "1\n");
     assert!(out(&mut a, "grep '(' notes.txt").contains("Invalid regular expression"));
     assert!(out(&mut a, "grep x /nope").contains("grep: /nope: No such file or directory"));
     assert_eq!(out(&mut a, "grep -q TODO notes.txt; echo $?"), "0\n");
@@ -336,76 +350,66 @@ fn grep_in_its_common_forms() {
 #[test]
 fn redirects_pipes_and_connectors() {
     let mut a = admin();
-    assert_eq!(out(&mut a, "echo hi > f; cat f"), "hi\n");
-    assert_eq!(out(&mut a, "echo more >> f; cat f"), "hi\nmore\n");
-    assert_eq!(out(&mut a, "echo gone > f; cat f"), "gone\n", "> truncates");
-    assert_eq!(out(&mut a, "cat /nope 2>/dev/null; echo rc=$?"), "rc=1\n");
-    assert_eq!(
-        out(&mut a, "cat /nope >/dev/null 2>&1; echo rc=$?"),
-        "rc=1\n"
-    );
-    assert_eq!(out(&mut a, "cat /nope 2>&1 | wc -l"), "1\n");
-    assert_eq!(out(&mut a, "false && echo no"), "");
-    assert_eq!(out(&mut a, "false || echo yes"), "yes\n");
-    assert_eq!(out(&mut a, "true && echo a && echo b"), "a\nb\n");
-    assert_eq!(out(&mut a, "echo a; echo b"), "a\nb\n");
-    assert_eq!(
-        out(&mut a, "echo a &"),
-        "a\n",
-        "background is just foreground here"
-    );
-    assert_eq!(
-        out(&mut a, "echo x > /etc/passwd"),
-        "-bash: /etc/passwd: Permission denied\n"
-    );
-    assert_eq!(
-        out(&mut a, "echo x > /nope/f"),
-        "-bash: /nope/f: No such file or directory\n"
-    );
-    assert_eq!(
-        out(&mut a, "echo x > /tmp"),
-        "-bash: /tmp: Is a directory\n"
-    );
-    assert_eq!(out(&mut a, "cat < f"), "gone\n");
-    assert_eq!(
-        out(&mut a, "cat < /nope"),
-        "-bash: /nope: No such file or directory\n"
-    );
-    assert_eq!(
-        out(&mut a, "> empty; wc -c empty"),
-        "      0 empty\n",
-        "a bare redirect creates the file"
+    transcript(
+        &mut a,
+        &[
+            ("echo hi > f; cat f", "hi\n"),
+            ("echo more >> f; cat f", "hi\nmore\n"),
+            ("echo gone > f; cat f", "gone\n"), // > truncates
+            ("cat /nope 2>/dev/null; echo rc=$?", "rc=1\n"),
+            ("cat /nope >/dev/null 2>&1; echo rc=$?", "rc=1\n"),
+            ("cat /nope 2>&1 | wc -l", "1\n"),
+            ("false && echo no", ""),
+            ("false || echo yes", "yes\n"),
+            ("true && echo a && echo b", "a\nb\n"),
+            ("echo a; echo b", "a\nb\n"),
+            ("echo a &", "a\n"), // background is just foreground here
+            (
+                "echo x > /etc/passwd",
+                "-bash: /etc/passwd: Permission denied\n",
+            ),
+            (
+                "echo x > /nope/f",
+                "-bash: /nope/f: No such file or directory\n",
+            ),
+            ("echo x > /tmp", "-bash: /tmp: Is a directory\n"),
+            ("cat < f", "gone\n"),
+            ("cat < /nope", "-bash: /nope: No such file or directory\n"),
+            ("> empty; wc -c empty", "      0 empty\n"), // a bare redirect creates the file
+        ],
     );
 }
 
 #[test]
 fn quoting_variables_and_globs() {
     let mut a = admin();
-    assert_eq!(
-        out(&mut a, "echo \"$HOME\" '$HOME' ~ $USER"),
-        "/home/admin $HOME /home/admin admin\n"
+    transcript(
+        &mut a,
+        &[
+            (
+                "echo \"$HOME\" '$HOME' ~ $USER",
+                "/home/admin $HOME /home/admin admin\n",
+            ),
+            ("echo a$NOPE-b", "a-b\n"),
+            (
+                "export GREETING=hi; echo $GREETING ${GREETING}x",
+                "hi hix\n",
+            ),
+            ("FOO=bar; echo $FOO", "bar\n"),
+            ("unset FOO; echo [$FOO]", "[]\n"),
+        ],
     );
-    assert_eq!(out(&mut a, "echo a$NOPE-b"), "a-b\n");
-    assert_eq!(
-        out(&mut a, "export GREETING=hi; echo $GREETING ${GREETING}x"),
-        "hi hix\n"
-    );
-    assert_eq!(out(&mut a, "FOO=bar; echo $FOO"), "bar\n");
-    assert_eq!(out(&mut a, "unset FOO; echo [$FOO]"), "[]\n");
     run(&mut a, "cd /tmp; touch a.txt b.txt c.log");
-    assert_eq!(out(&mut a, "ls *.txt"), "a.txt  b.txt\n");
-    assert_eq!(out(&mut a, "echo *.log"), "c.log\n");
-    assert_eq!(
-        out(&mut a, "echo *.nomatch"),
-        "*.nomatch\n",
-        "no match keeps the pattern"
+    transcript(
+        &mut a,
+        &[
+            ("ls *.txt", "a.txt  b.txt\n"),
+            ("echo *.log", "c.log\n"),
+            ("echo *.nomatch", "*.nomatch\n"), // no match keeps the pattern
+            ("echo '*.txt'", "*.txt\n"),       // quoted globs are literal
+            ("echo [ab].txt", "a.txt b.txt\n"),
+        ],
     );
-    assert_eq!(
-        out(&mut a, "echo '*.txt'"),
-        "*.txt\n",
-        "quoted globs are literal"
-    );
-    assert_eq!(out(&mut a, "echo [ab].txt"), "a.txt b.txt\n");
     run(&mut a, "rm *.txt");
     assert_eq!(out(&mut a, "ls"), "c.log\n");
 }
@@ -413,44 +417,41 @@ fn quoting_variables_and_globs() {
 #[test]
 fn errors_look_like_bash() {
     let mut a = admin();
-    assert_eq!(
-        out(&mut a, "frobnicate --now"),
-        "-bash: frobnicate: command not found\n"
+    transcript(
+        &mut a,
+        &[
+            ("frobnicate --now", "-bash: frobnicate: command not found\n"),
+            (
+                "frobnicate; echo $?",
+                "-bash: frobnicate: command not found\n127\n",
+            ),
+            (
+                "echo 'unterminated",
+                "-bash: unexpected EOF while looking for matching `''\n",
+            ),
+            (
+                "ls ;; ls",
+                "-bash: syntax error near unexpected token `;'\n",
+            ),
+            ("./nothing", "-bash: ./nothing: No such file or directory\n"),
+            ("/tmp", "-bash: /tmp: Is a directory\n"),
+            ("$NOPE", ""), // an empty command line is not an error
+            ("# a comment", ""),
+            ("   ", ""),
+        ],
     );
-    assert_eq!(
-        out(&mut a, "frobnicate; echo $?"),
-        "-bash: frobnicate: command not found\n127\n"
-    );
-    assert_eq!(
-        out(&mut a, "echo 'unterminated"),
-        "-bash: unexpected EOF while looking for matching `''\n"
-    );
-    assert_eq!(
-        out(&mut a, "ls ;; ls"),
-        "-bash: syntax error near unexpected token `;'\n"
-    );
-    assert_eq!(
-        out(&mut a, "./nothing"),
-        "-bash: ./nothing: No such file or directory\n"
-    );
-    assert_eq!(out(&mut a, "/tmp"), "-bash: /tmp: Is a directory\n");
-    assert_eq!(
-        out(&mut a, "$NOPE"),
-        "",
-        "an empty command line is not an error"
-    );
-    assert_eq!(out(&mut a, "# a comment"), "");
-    assert_eq!(out(&mut a, "   "), "");
 }
 
 #[test]
 fn sh_dash_c_runs_its_argument() {
     let mut a = admin();
-    assert_eq!(out(&mut a, "sh -c 'echo hi; whoami'"), "hi\nadmin\n");
-    assert_eq!(out(&mut a, "bash -c \"echo \\$HOME\""), "/home/admin\n");
-    assert_eq!(
-        out(&mut a, "echo 'echo piped; id -u' | sh"),
-        "piped\n1000\n"
+    transcript(
+        &mut a,
+        &[
+            ("sh -c 'echo hi; whoami'", "hi\nadmin\n"),
+            ("bash -c \"echo \\$HOME\"", "/home/admin\n"),
+            ("echo 'echo piped; id -u' | sh", "piped\n1000\n"),
+        ],
     );
 }
 
@@ -493,8 +494,13 @@ fn history_env_and_clear() {
             && env.contains("SHELL=/bin/bash\n"),
         "{env}"
     );
-    assert_eq!(out(&mut a, "printenv HOME"), "/home/admin\n");
-    assert_eq!(out(&mut a, "clear"), "\x1b[H\x1b[2J\x1b[3J");
+    transcript(
+        &mut a,
+        &[
+            ("printenv HOME", "/home/admin\n"),
+            ("clear", "\x1b[H\x1b[2J\x1b[3J"),
+        ],
+    );
 }
 
 // ------------------------------------------------------ changing things
@@ -502,68 +508,29 @@ fn history_env_and_clear() {
 #[test]
 fn files_and_directories_can_be_created_moved_copied_and_removed() {
     let mut a = admin();
-    assert_eq!(out(&mut a, "mkdir work; cd work; touch a; ls"), "a\n");
-    assert_eq!(
-        out(&mut a, "mkdir a"),
-        "mkdir: cannot create directory ‘a’: File exists\n"
-    );
-    assert_eq!(out(&mut a, "mkdir -p x/y/z; ls x/y"), "z\n");
-    assert_eq!(
-        out(&mut a, "mkdir -p x/y/z; echo ok"),
-        "ok\n",
-        "-p tolerates existing"
-    );
-    assert_eq!(
-        out(&mut a, "mkdir /etc/foo"),
-        "mkdir: cannot create directory ‘/etc/foo’: Permission denied\n"
-    );
-    assert_eq!(
-        out(&mut a, "mkdir /nope/x"),
-        "mkdir: cannot create directory ‘/nope/x’: No such file or directory\n"
-    );
-    assert_eq!(out(&mut a, "cp a b; ls"), "a  b  x\n");
-    assert_eq!(out(&mut a, "mv b c; ls"), "a  c  x\n");
-    assert_eq!(
-        out(&mut a, "cp x y"),
-        "cp: -r not specified; omitting directory 'x'\n"
-    );
-    assert_eq!(out(&mut a, "cp -r x y; ls y"), "y\n");
-    assert_eq!(
-        out(&mut a, "cp /nope z"),
-        "cp: cannot stat '/nope': No such file or directory\n"
-    );
-    assert_eq!(
-        out(&mut a, "cp c /nope/z"),
-        "cp: cannot create regular file '/nope/z': No such file or directory\n"
-    );
-    assert_eq!(
-        out(&mut a, "mv a x; ls x"),
-        "a  y\n",
-        "moving into a directory"
-    );
-    assert_eq!(out(&mut a, "rm c; ls"), "x  y\n");
-    assert_eq!(
-        out(&mut a, "rm x"),
-        "rm: cannot remove 'x': Is a directory\n"
-    );
-    assert_eq!(out(&mut a, "rm -r x y; ls"), "");
-    assert_eq!(
-        out(&mut a, "rm /nope"),
-        "rm: cannot remove '/nope': No such file or directory\n"
-    );
-    assert_eq!(out(&mut a, "rm -f /nope; echo $?"), "0\n");
-    assert_eq!(
-        out(&mut a, "rm /etc/passwd"),
-        "rm: cannot remove '/etc/passwd': Permission denied\n"
-    );
-    assert_eq!(
-        out(&mut a, "rm"),
-        "rm: missing operand\nTry 'rm --help' for more information.\n"
-    );
-    assert_eq!(
-        out(&mut a, "cp a"),
-        "cp: missing destination file operand after 'a'\nTry 'cp --help' for more information.\n"
-    );
+    transcript(&mut a, &[
+        ("mkdir work; cd work; touch a; ls", "a\n"),
+        ("mkdir a", "mkdir: cannot create directory ‘a’: File exists\n"),
+        ("mkdir -p x/y/z; ls x/y", "z\n"),
+        ("mkdir -p x/y/z; echo ok", "ok\n"), // -p tolerates existing
+        ("mkdir /etc/foo", "mkdir: cannot create directory ‘/etc/foo’: Permission denied\n"),
+        ("mkdir /nope/x", "mkdir: cannot create directory ‘/nope/x’: No such file or directory\n"),
+        ("cp a b; ls", "a  b  x\n"),
+        ("mv b c; ls", "a  c  x\n"),
+        ("cp x y", "cp: -r not specified; omitting directory 'x'\n"),
+        ("cp -r x y; ls y", "y\n"),
+        ("cp /nope z", "cp: cannot stat '/nope': No such file or directory\n"),
+        ("cp c /nope/z", "cp: cannot create regular file '/nope/z': No such file or directory\n"),
+        ("mv a x; ls x", "a  y\n"), // moving into a directory
+        ("rm c; ls", "x  y\n"),
+        ("rm x", "rm: cannot remove 'x': Is a directory\n"),
+        ("rm -r x y; ls", ""),
+        ("rm /nope", "rm: cannot remove '/nope': No such file or directory\n"),
+        ("rm -f /nope; echo $?", "0\n"),
+        ("rm /etc/passwd", "rm: cannot remove '/etc/passwd': Permission denied\n"),
+        ("rm", "rm: missing operand\nTry 'rm --help' for more information.\n"),
+        ("cp a", "cp: missing destination file operand after 'a'\nTry 'cp --help' for more information.\n"),
+    ]);
 }
 
 #[test]
@@ -597,21 +564,26 @@ fn chmod_chown_and_permissions() {
         out(&mut a, "chmod +x f; ls -l f").split_whitespace().next(),
         Some("-rwx--x--x")
     );
-    assert_eq!(
-        out(&mut a, "chmod 99x f"),
-        "chmod: invalid mode: ‘99x’\nTry 'chmod --help' for more information.\n"
-    );
-    assert_eq!(
-        out(&mut a, "chmod 644 /nope"),
-        "chmod: cannot access '/nope': No such file or directory\n"
-    );
-    assert_eq!(
-        out(&mut a, "chmod 777 /etc/passwd"),
-        "chmod: changing permissions of '/etc/passwd': Operation not permitted\n"
-    );
-    assert_eq!(
-        out(&mut a, "chown root f"),
-        "chown: changing ownership of 'f': Operation not permitted\n"
+    transcript(
+        &mut a,
+        &[
+            (
+                "chmod 99x f",
+                "chmod: invalid mode: ‘99x’\nTry 'chmod --help' for more information.\n",
+            ),
+            (
+                "chmod 644 /nope",
+                "chmod: cannot access '/nope': No such file or directory\n",
+            ),
+            (
+                "chmod 777 /etc/passwd",
+                "chmod: changing permissions of '/etc/passwd': Operation not permitted\n",
+            ),
+            (
+                "chown root f",
+                "chown: changing ownership of 'f': Operation not permitted\n",
+            ),
+        ],
     );
     let mut r = root();
     run(&mut r, "touch /tmp/g; chown admin:dialout /tmp/g");
@@ -621,22 +593,32 @@ fn chmod_chown_and_permissions() {
 #[test]
 fn a_directory_you_cannot_search_reveals_nothing_about_its_contents() {
     let mut a = admin();
-    assert_eq!(
-        out(&mut a, "cat /root/.bashrc"),
-        "cat: /root/.bashrc: Permission denied\n"
-    );
-    assert_eq!(
-        out(&mut a, "ls /root/.ssh"),
-        "ls: cannot access '/root/.ssh': Permission denied\n"
+    transcript(
+        &mut a,
+        &[
+            (
+                "cat /root/.bashrc",
+                "cat: /root/.bashrc: Permission denied\n",
+            ),
+            (
+                "ls /root/.ssh",
+                "ls: cannot access '/root/.ssh': Permission denied\n",
+            ),
+        ],
     );
     // ...including whether a name exists: both must give the same answer
-    assert_eq!(
-        out(&mut a, "cat /root/definitely-not-here"),
-        "cat: /root/definitely-not-here: Permission denied\n"
-    );
-    assert_eq!(
-        out(&mut a, "ls /root/definitely-not-here"),
-        "ls: cannot access '/root/definitely-not-here': Permission denied\n"
+    transcript(
+        &mut a,
+        &[
+            (
+                "cat /root/definitely-not-here",
+                "cat: /root/definitely-not-here: Permission denied\n",
+            ),
+            (
+                "ls /root/definitely-not-here",
+                "ls: cannot access '/root/definitely-not-here': Permission denied\n",
+            ),
+        ],
     );
 }
 
@@ -647,15 +629,25 @@ fn echo_dash_e_and_printf_can_write_a_binary() {
         &mut a,
         r"echo -e '\x7fELF\x02\x01\x01' > bin; printf '\x00\x01' >> bin",
     );
-    assert_eq!(out(&mut a, "wc -c bin"), "     10 bin\n");
-    assert_eq!(out(&mut a, "printf '%s-%d\\n' a 1"), "a-1\n");
+    transcript(
+        &mut a,
+        &[
+            ("wc -c bin", "     10 bin\n"),
+            ("printf '%s-%d\\n' a 1", "a-1\n"),
+        ],
+    );
 }
 
 #[test]
 fn base64_round_trip_through_a_pipe() {
     let mut a = admin();
-    assert_eq!(out(&mut a, "echo -n foobar | base64"), "Zm9vYmFy\n");
-    assert_eq!(out(&mut a, "echo Zm9vYmFy | base64 -d"), "foobar");
+    transcript(
+        &mut a,
+        &[
+            ("echo -n foobar | base64", "Zm9vYmFy\n"),
+            ("echo Zm9vYmFy | base64 -d", "foobar"),
+        ],
+    );
 }
 
 // ---------------------------------------------------------- system info
@@ -663,16 +655,18 @@ fn base64_round_trip_through_a_pipe() {
 #[test]
 fn system_reports_are_consistent() {
     let mut a = admin();
-    assert_eq!(
-        out(&mut a, "uptime"),
-        " 18:22:09 up 41 days,  6:57,  1 user,  load average: 0.08, 0.03, 0.01\n"
+    transcript(
+        &mut a,
+        &[
+            (
+                "uptime",
+                " 18:22:09 up 41 days,  6:57,  1 user,  load average: 0.08, 0.03, 0.01\n",
+            ),
+            ("uptime -p", "up 41 days, 6 hours, 57 minutes\n"),
+            ("date", "Fri Oct 31 18:22:09 UTC 2025\n"),
+            ("date +%Y-%m-%d", "2025-10-31\n"),
+        ],
     );
-    assert_eq!(
-        out(&mut a, "uptime -p"),
-        "up 41 days, 6 hours, 57 minutes\n"
-    );
-    assert_eq!(out(&mut a, "date"), "Fri Oct 31 18:22:09 UTC 2025\n");
-    assert_eq!(out(&mut a, "date +%Y-%m-%d"), "2025-10-31\n");
     let w = out(&mut a, "w");
     assert!(
         w.contains("USER     TTY      FROM") && w.contains("admin    pts/0    10.20.0.14"),
@@ -733,47 +727,29 @@ fn network_reports_use_the_spec() {
         ip.contains("inet 10.20.0.31/24 brd 10.20.0.255 scope global eth0"),
         "{ip}"
     );
-    assert_eq!(
-        out(&mut a, "ip route"),
-        "default via 10.20.0.1 dev eth0 proto static\n10.20.0.0/24 dev eth0 proto kernel scope link src 10.20.0.31\n"
-    );
-    assert_eq!(
-        out(&mut a, "ip bogus"),
-        "Object \"bogus\" is unknown, try \"ip help\".\n"
-    );
-    assert_eq!(
-        out(&mut a, "ifconfig"),
-        "-bash: ifconfig: command not found\n",
-        "net-tools is not on a stock Ubuntu server"
-    );
+    transcript(&mut a, &[
+        ("ip route", "default via 10.20.0.1 dev eth0 proto static\n10.20.0.0/24 dev eth0 proto kernel scope link src 10.20.0.31\n"),
+        ("ip bogus", "Object \"bogus\" is unknown, try \"ip help\".\n"),
+        ("ifconfig", "-bash: ifconfig: command not found\n"), // net-tools is not on a stock Ubuntu server
+    ]);
 }
 
 #[test]
 fn which_stubs_and_wrappers() {
     let mut a = admin();
-    assert_eq!(
-        out(&mut a, "which wget awk"),
-        "/usr/bin/wget\n/usr/bin/awk\n"
+    transcript(
+        &mut a,
+        &[
+            ("which wget awk", "/usr/bin/wget\n/usr/bin/awk\n"),
+            ("which cd; echo $?", "1\n"), // builtins are not files
+            ("command -v curl", "/usr/bin/curl\n"),
+            ("awk '{print $1}' /etc/passwd", ""), // present but not emulated: silent success
+            ("nohup echo hi", "hi\n"),
+            ("sleep 30; echo woke", "woke\n"), // sleep does not block
+            ("true; echo $?", "0\n"),
+            ("false; echo $?", "1\n"),
+        ],
     );
-    assert_eq!(
-        out(&mut a, "which cd; echo $?"),
-        "1\n",
-        "builtins are not files"
-    );
-    assert_eq!(out(&mut a, "command -v curl"), "/usr/bin/curl\n");
-    assert_eq!(
-        out(&mut a, "awk '{print $1}' /etc/passwd"),
-        "",
-        "present but not emulated: silent success"
-    );
-    assert_eq!(out(&mut a, "nohup echo hi"), "hi\n");
-    assert_eq!(
-        out(&mut a, "sleep 30; echo woke"),
-        "woke\n",
-        "sleep does not block"
-    );
-    assert_eq!(out(&mut a, "true; echo $?"), "0\n");
-    assert_eq!(out(&mut a, "false; echo $?"), "1\n");
 }
 
 // ---------------------------------------------------- the attacker's moves
@@ -1018,11 +994,12 @@ fn privilege_escalation_is_refused_and_flagged() {
 fn sudoers_can_run_things_as_root() {
     let spec = default_spec().replace("groups: [admin, dialout]", "groups: [admin, sudo]");
     let mut a = host_for(&spec, "admin");
-    assert_eq!(out(&mut a, "sudo whoami"), "root\n");
-    assert_eq!(
-        out(&mut a, "whoami"),
-        "admin\n",
-        "only that command ran as root"
+    transcript(
+        &mut a,
+        &[
+            ("sudo whoami", "root\n"),
+            ("whoami", "admin\n"), // only that command ran as root
+        ],
     );
     assert_eq!(out(&mut a, "sudo cat /etc/shadow").lines().count(), 3);
     assert_eq!(run(&mut a, "sudo -i").prompt, "root@plc-gw-03:~# ");

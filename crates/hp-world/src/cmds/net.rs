@@ -6,7 +6,7 @@
 //! on (revealing the next stage) while we never contact, resolve, or fetch
 //! anything. Every fetch raises `payload_fetch`.
 
-use super::Streams;
+use super::{Opts, Streams};
 use crate::fs::MAX_FILE_BYTES;
 use crate::shell::Shell;
 use crate::timefmt::strftime;
@@ -129,9 +129,9 @@ fn unique_name(sh: &Shell, dir: &str, name: &str) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
-/// Short flags of wget that take a value.
-const WGET_VALUE_SHORT: &str = "OoPtTUewi";
-const WGET_VALUE_LONG: &[&str] = &[
+/// Options of `wget` that take a value.
+const WGET_VALUES: &str = "OoPtTUewi";
+const WGET_LONG_VALUES: &[&str] = &[
     "output-document",
     "output-file",
     "directory-prefix",
@@ -147,55 +147,11 @@ const WGET_VALUE_LONG: &[&str] = &[
 ];
 
 pub(crate) fn wget(sh: &mut Shell, args: &[String]) -> Streams {
-    let (mut quiet, mut output, mut prefix) = (false, None::<String>, None::<String>);
-    let mut urls = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let a = &args[i];
-        i += 1;
-        if let Some(long) = a.strip_prefix("--") {
-            let (key, inline) = long
-                .split_once('=')
-                .map_or((long, None), |(k, v)| (k, Some(v.to_string())));
-            let value = if WGET_VALUE_LONG.contains(&key) {
-                inline.or_else(|| {
-                    i += 1;
-                    args.get(i - 1).cloned()
-                })
-            } else {
-                None
-            };
-            match key {
-                "quiet" => quiet = true,
-                "output-document" => output = value,
-                "directory-prefix" => prefix = value,
-                _ => {}
-            }
-        } else if a.starts_with('-') && a.len() > 1 {
-            let chars: Vec<char> = a[1..].chars().collect();
-            for (n, c) in chars.iter().enumerate() {
-                if *c == 'q' {
-                    quiet = true;
-                } else if WGET_VALUE_SHORT.contains(*c) {
-                    let attached: String = chars[n + 1..].iter().collect();
-                    let value = if attached.is_empty() {
-                        i += 1;
-                        args.get(i - 1).cloned()
-                    } else {
-                        Some(attached)
-                    };
-                    match c {
-                        'O' => output = value,
-                        'P' => prefix = value,
-                        _ => {}
-                    }
-                    break;
-                }
-            }
-        } else {
-            urls.push(a.clone());
-        }
-    }
+    let o = Opts::parse(args, WGET_VALUES, WGET_LONG_VALUES);
+    let quiet = o.has('q') || o.is_set("quiet");
+    let output = o.value(&["O", "output-document"]).map(String::from);
+    let prefix = o.value(&["P", "directory-prefix"]).map(String::from);
+    let urls = o.rest;
     if urls.is_empty() {
         return Streams::fail(1, "wget: missing URL\nUsage: wget [OPTION]... [URL]...\n\nTry `wget --help' for more options.");
     }
@@ -292,8 +248,9 @@ pub(crate) fn wget(sh: &mut Shell, args: &[String]) -> Streams {
     }
 }
 
-const CURL_VALUE_SHORT: &str = "oAHXduWmebcTwK";
-const CURL_VALUE_LONG: &[&str] = &[
+/// Options of `curl` that take a value.
+const CURL_VALUES: &str = "oAHXduWmebcTwK";
+const CURL_LONG_VALUES: &[&str] = &[
     "output",
     "user-agent",
     "header",
@@ -312,57 +269,17 @@ const CURL_VALUE_LONG: &[&str] = &[
 ];
 
 pub(crate) fn curl(sh: &mut Shell, args: &[String]) -> Streams {
-    let (mut silent, mut remote_name, mut output) = (false, false, None::<String>);
-    let mut urls = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let a = &args[i];
-        i += 1;
-        if let Some(long) = a.strip_prefix("--") {
-            let (key, inline) = long
-                .split_once('=')
-                .map_or((long, None), |(k, v)| (k, Some(v.to_string())));
-            let value = if CURL_VALUE_LONG.contains(&key) {
-                inline.or_else(|| {
-                    i += 1;
-                    args.get(i - 1).cloned()
-                })
-            } else {
-                None
-            };
-            match key {
-                "silent" => silent = true,
-                "remote-name" => remote_name = true,
-                "output" => output = value,
-                "url" => urls.extend(value),
-                _ => {}
-            }
-        } else if a.starts_with('-') && a.len() > 1 {
-            let chars: Vec<char> = a[1..].chars().collect();
-            for (n, c) in chars.iter().enumerate() {
-                match c {
-                    's' => silent = true,
-                    'O' => remote_name = true,
-                    c if CURL_VALUE_SHORT.contains(*c) => {
-                        let attached: String = chars[n + 1..].iter().collect();
-                        let value = if attached.is_empty() {
-                            i += 1;
-                            args.get(i - 1).cloned()
-                        } else {
-                            Some(attached)
-                        };
-                        if *c == 'o' {
-                            output = value;
-                        }
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        } else {
-            urls.push(a.clone());
-        }
-    }
+    let o = Opts::parse(args, CURL_VALUES, CURL_LONG_VALUES);
+    let silent = o.has('s') || o.is_set("silent");
+    let remote_name = o.has('O') || o.is_set("remote-name");
+    let output = o.value(&["o", "output"]).map(String::from);
+    let mut urls = o.rest;
+    urls.extend(
+        o.values
+            .iter()
+            .filter(|(k, _)| k == "url")
+            .map(|(_, v)| v.clone()),
+    );
     if urls.is_empty() {
         return Streams::fail(
             2,

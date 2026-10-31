@@ -28,13 +28,19 @@ impl Streams {
         }
     }
 
-    /// A failure with a one-line message on stderr.
+    /// A command that failed with a single message.
     pub fn fail(status: i32, message: impl AsRef<str>) -> Streams {
-        Streams {
-            err: format!("{}\n", message.as_ref()).into_bytes(),
-            status,
-            ..Streams::default()
-        }
+        let mut s = Streams::default();
+        s.error(status, message);
+        s
+    }
+
+    /// Report a failure: the message (one line) goes to stderr and the
+    /// command's exit status becomes `status`. The command carries on.
+    pub fn error(&mut self, status: i32, message: impl AsRef<str>) {
+        self.err.extend_from_slice(message.as_ref().as_bytes());
+        self.err.push(b'\n');
+        self.status = status;
     }
 }
 
@@ -141,8 +147,8 @@ pub(crate) fn dispatch(sh: &mut Shell, name: &str, args: &[String], stdin: &[u8]
         "touch" => files::touch(sh, args),
         "mkdir" => files::mkdir(sh, args),
         "rm" => files::rm(sh, args),
-        "cp" => files::cp(sh, args),
-        "mv" => files::mv(sh, args),
+        "cp" => files::transfer(sh, args, false),
+        "mv" => files::transfer(sh, args, true),
         "chmod" => files::chmod(sh, args),
         "chown" => files::chown(sh, args),
         "head" => files::head_tail(sh, args, stdin, true),
@@ -193,25 +199,88 @@ pub(crate) fn dispatch(sh: &mut Shell, name: &str, args: &[String], stdin: &[u8]
     }
 }
 
-/// Split `args` into single-letter flags, long flags and positionals.
-/// A bare `--` ends flag parsing. Negative numbers (`-5`) are positionals.
-pub(crate) fn split_flags(args: &[String]) -> (String, Vec<String>, Vec<String>) {
-    let (mut short, mut long, mut rest) = (String::new(), Vec::new(), Vec::new());
-    let mut flags_done = false;
-    for a in args {
-        if flags_done || a == "-" || !a.starts_with('-') {
-            rest.push(a.clone());
-        } else if a == "--" {
-            flags_done = true;
-        } else if let Some(l) = a.strip_prefix("--") {
-            long.push(l.to_string());
-        } else if a[1..].chars().all(|c| c.is_ascii_digit()) {
-            rest.push(a.clone());
-        } else {
-            short.push_str(&a[1..]);
+/// A command line, split into flags, options with values, and operands.
+#[derive(Debug, Default)]
+pub(crate) struct Opts {
+    /// Single-letter flags, in order (`-la` gives `la`).
+    pub flags: String,
+    /// Long flags without a value (`--force` gives `force`).
+    pub long: Vec<String>,
+    /// Options that took a value, by name: `-O file` and `--output-document=file`.
+    pub values: Vec<(String, String)>,
+    /// Everything else. A bare `--` ends option parsing; `-` and negative
+    /// numbers (`-5`) are operands.
+    pub rest: Vec<String>,
+}
+
+impl Opts {
+    /// `short_values` lists the single-letter options that take an argument
+    /// (attached or as the next word); `long_values` the long ones.
+    pub fn parse(args: &[String], short_values: &str, long_values: &[&str]) -> Opts {
+        let mut o = Opts::default();
+        let mut it = args.iter();
+        let mut options_done = false;
+        while let Some(a) = it.next() {
+            if options_done
+                || a == "-"
+                || !a.starts_with('-')
+                || a[1..].chars().all(|c| c.is_ascii_digit())
+            {
+                o.rest.push(a.clone());
+            } else if a == "--" {
+                options_done = true;
+            } else if let Some(long) = a.strip_prefix("--") {
+                let (key, inline) = long
+                    .split_once('=')
+                    .map_or((long, None), |(k, v)| (k, Some(v.to_string())));
+                if !long_values.contains(&key) {
+                    o.long.push(key.to_string());
+                } else if let Some(v) = inline.or_else(|| it.next().cloned()) {
+                    o.values.push((key.to_string(), v));
+                }
+            } else {
+                for (i, c) in a[1..].char_indices() {
+                    if short_values.contains(c) {
+                        let attached = &a[1 + i + c.len_utf8()..];
+                        let v = if attached.is_empty() {
+                            it.next().cloned()
+                        } else {
+                            Some(attached.to_string())
+                        };
+                        o.values.extend(v.map(|v| (c.to_string(), v)));
+                        break;
+                    }
+                    o.flags.push(c);
+                }
+            }
         }
+        o
     }
-    (short, long, rest)
+
+    /// Is the single-letter flag set?
+    pub fn has(&self, c: char) -> bool {
+        self.flags.contains(c)
+    }
+
+    /// Is the long flag set?
+    pub fn is_set(&self, long: &str) -> bool {
+        self.long.iter().any(|l| l == long)
+    }
+
+    /// The value given for any of `names` (the last one wins).
+    pub fn value(&self, names: &[&str]) -> Option<&str> {
+        self.values
+            .iter()
+            .rev()
+            .find(|(k, _)| names.contains(&k.as_str()))
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// `(flags, long flags, operands)` for commands with no value-taking options.
+pub(crate) fn split_flags(args: &[String]) -> (String, Vec<String>, Vec<String>) {
+    let o = Opts::parse(args, "", &[]);
+    (o.flags, o.long, o.rest)
 }
 
 #[cfg(test)]
@@ -223,10 +292,43 @@ mod tests {
     }
 
     #[test]
+    fn options_with_values_attached_separate_and_long() {
+        let o = Opts::parse(
+            &v(&[
+                "-qO-",
+                "-P",
+                "dir",
+                "--output-document=x",
+                "-t5",
+                "url",
+                "--",
+                "-z",
+            ]),
+            "OPt",
+            &["output-document"],
+        );
+        assert_eq!(o.flags, "q");
+        assert_eq!(
+            o.value(&["O", "output-document"]),
+            Some("x"),
+            "the last value wins"
+        );
+        assert_eq!(o.value(&["P"]), Some("dir"));
+        assert_eq!(o.value(&["t"]), Some("5"));
+        assert_eq!(o.rest, ["url", "-z"]);
+        assert!(o.has('q') && !o.has('O'));
+        let o = Opts::parse(&v(&["--force", "-O"]), "O", &[]);
+        assert!(
+            o.is_set("force") && o.values.is_empty(),
+            "a value option at the very end has no value"
+        );
+    }
+
+    #[test]
     fn flag_splitting() {
         let (s, l, r) = split_flags(&v(&["-la", "--color=auto", "dir", "-", "-5", "--", "-x"]));
         assert_eq!(s, "la");
-        assert_eq!(l, ["color=auto"]);
+        assert_eq!(l, ["color"]);
         assert_eq!(r, ["dir", "-", "-5", "-x"]);
     }
 

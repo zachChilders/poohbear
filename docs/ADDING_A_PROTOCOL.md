@@ -63,7 +63,7 @@ kit, the world, or `hp-log`.
 - [ ] Dangerous features are refused *and* logged.
 - [ ] Limits hold: input cap, session timeout (supervised by `hp-bin`).
 - [ ] `hp-testkit` conformance checks pass: `lifecycle`, `envelope`,
-      `input_cap_enforced`, `no_raw_control_characters`.
+      `input_cap_enforced`.
 - [ ] A real client drives it end to end (in-memory stream in tests; the real
       binary and a different client implementation once by hand).
 - [ ] Hostile input cannot reach the terminal or the log unescaped.
@@ -71,29 +71,9 @@ kit, the world, or `hp-log`.
 
 ## Smallest possible example
 
-`hp-proto-banner` is the reference: ~50 lines of logic for a raw TCP protocol.
-
-```rust
-async fn converse(stream: &mut dyn AsyncStream, driver: &mut Driver, banner: Option<&str>)
-    -> anyhow::Result<()>
-{
-    let mut out = StreamOut(stream);
-    if let Some(b) = banner {
-        let line = Action::Send(Bytes::from(format!("{b}\r\n")));
-        apply(&mut out, driver.log(), vec![line], false).await?;
-    }
-    let reply = driver.connect().into_actions();
-    if apply(&mut out, driver.log(), reply, false).await?.flow == Flow::Close { return Ok(()) }
-
-    let mut buf = [0u8; 4096];
-    loop {
-        let n = out.0.read(&mut buf).await?;
-        if n == 0 || driver.receive(&buf[..n]).is_err() { return Ok(()) }
-        let reply = driver.react(&Event::Raw(Bytes::copy_from_slice(&buf[..n]))).into_actions();
-        if apply(&mut out, driver.log(), reply, false).await?.flow == Flow::Close { return Ok(()) }
-    }
-}
-```
+`crates/hp-proto-banner/src/lib.rs` is the reference: about 50 lines of logic
+for a raw TCP protocol (`Driver::connect`, a read loop calling
+`Driver::receive` / `Driver::react`, and `apply` for each reply).
 
 A framed binary protocol (Modbus, S7) replaces the read loop with a pure
 `decode(&mut BytesMut) -> Option<Request>` function, which is what you fuzz,

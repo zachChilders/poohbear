@@ -15,7 +15,7 @@ hp-core.workspace = true
 hp-kit.workspace = true
 hp-log.workspace = true
 rand = "0.10"
-russh = { version = "0.65", default-features = false, features = ["ring", "flate2", "rsa"] }
+russh = { version = "0.65", default-features = false, features = ["ring"] }
 tokio.workspace = true
 
 [dev-dependencies]

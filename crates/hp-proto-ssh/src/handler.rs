@@ -331,30 +331,6 @@ impl Handler for Conn {
         session.channel_failure(channel)
     }
 
-    // Environment and X11 requests are politely declined, as a locked-down
-    // sshd would. They are routine client noise, so they are not logged.
-    async fn env_request(
-        &mut self,
-        channel: ChannelId,
-        _name: &str,
-        _value: &str,
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        session.channel_failure(channel)
-    }
-
-    async fn x11_request(
-        &mut self,
-        channel: ChannelId,
-        _single_connection: bool,
-        _protocol: &str,
-        _cookie: &str,
-        _screen: u32,
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        session.channel_failure(channel)
-    }
-
     async fn data(
         &mut self,
         channel: ChannelId,

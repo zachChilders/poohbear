@@ -8,8 +8,9 @@ use crate::fs::{split, FsError, Kind, Meta, Node};
 use crate::shell::Shell;
 use crate::timefmt::ls_date;
 
+/// `cmd: name: reason`, the common coreutils shape.
 fn err(cmd: &str, what: &str, e: FsError) -> String {
-    format!("{cmd}: {what}: {}\n", e.message())
+    format!("{cmd}: {what}: {}", e.message())
 }
 
 // ---------------------------------------------------------------- running files
@@ -208,11 +209,8 @@ fn columns(names: &[String]) -> String {
 
 pub(crate) fn ls(sh: &mut Shell, args: &[String]) -> Streams {
     let (flags, _, paths) = split_flags(args);
-    let all = flags.contains('a');
-    let almost = flags.contains('A');
-    let long = flags.contains('l');
-    let human_sizes = flags.contains('h');
-    let dir_only = flags.contains('d');
+    let has = |c| flags.contains(c);
+    let (all, long) = (has('a'), has('l'));
     let now = sh.now();
     let paths = if paths.is_empty() {
         vec![".".to_string()]
@@ -220,34 +218,32 @@ pub(crate) fn ls(sh: &mut Shell, args: &[String]) -> Streams {
         paths
     };
 
-    let (mut out, mut errs, mut status) = (String::new(), String::new(), 0);
+    let mut r = Streams::default();
+    let mut out = String::new();
     let mut files: Vec<Row> = Vec::new();
     let mut dirs: Vec<(String, String)> = Vec::new();
-
     for p in &paths {
         let abs = sh.abs(p);
         // Checked first: a directory you cannot search must not reveal whether
         // anything exists in it.
         if !sh.fs.can_traverse(&abs, sh.actor()) {
-            errs.push_str(&format!("ls: cannot access '{p}': Permission denied\n"));
-            status = 2;
+            r.error(2, format!("ls: cannot access '{p}': Permission denied"));
             continue;
         }
         match sh.fs.node(&abs) {
-            None => {
-                errs.push_str(&format!(
-                    "ls: cannot access '{p}': No such file or directory\n"
-                ));
-                status = 2;
-            }
-            Some(n) if n.is_dir() && !dir_only => dirs.push((p.clone(), abs)),
+            None => r.error(
+                2,
+                format!("ls: cannot access '{p}': No such file or directory"),
+            ),
+            Some(n) if n.is_dir() && !has('d') => dirs.push((p.clone(), abs)),
             Some(n) => files.push(Row::new(p, n)),
         }
     }
 
     let render = |rows: Vec<Row>| -> String {
         if long {
-            long_lines(&rows, now, human_sizes).join("\n") + if rows.is_empty() { "" } else { "\n" }
+            let lines = long_lines(&rows, now, has('h'));
+            lines.iter().map(|l| format!("{l}\n")).collect()
         } else {
             columns(&rows.into_iter().map(|r| r.name).collect::<Vec<_>>())
         }
@@ -256,16 +252,15 @@ pub(crate) fn ls(sh: &mut Shell, args: &[String]) -> Streams {
     files.sort_by_key(|r| sort_key(&r.name));
     out.push_str(&render(files));
 
-    let show_headers = paths.len() > 1;
     for (i, (label, abs)) in dirs.iter().enumerate() {
         if !sh.fs.can_read(abs, sh.actor()) {
-            errs.push_str(&format!(
-                "ls: cannot open directory '{label}': Permission denied\n"
-            ));
-            status = 2;
+            r.error(
+                2,
+                format!("ls: cannot open directory '{label}': Permission denied"),
+            );
             continue;
         }
-        if show_headers {
+        if paths.len() > 1 {
             if !out.is_empty() || i > 0 {
                 out.push('\n');
             }
@@ -276,17 +271,13 @@ pub(crate) fn ls(sh: &mut Shell, args: &[String]) -> Streams {
             .list(abs)
             .unwrap_or_default()
             .into_iter()
-            .filter(|(name, _)| all || almost || !name.starts_with('.'))
+            .filter(|(name, _)| all || has('A') || !name.starts_with('.'))
             .map(|(name, node)| Row::new(name, node))
             .collect();
         if all {
             let parent = split(abs).map_or("/", |(p, _)| p);
-            if let Some(n) = sh.fs.node(abs) {
-                rows.push(Row::new(".", n));
-            }
-            if let Some(n) = sh.fs.node(parent) {
-                rows.push(Row::new("..", n));
-            }
+            rows.extend(sh.fs.node(abs).map(|n| Row::new(".", n)));
+            rows.extend(sh.fs.node(parent).map(|n| Row::new("..", n)));
         }
         rows.sort_by_key(|r| sort_key(&r.name));
         if long {
@@ -304,11 +295,8 @@ pub(crate) fn ls(sh: &mut Shell, args: &[String]) -> Streams {
         }
         out.push_str(&render(rows));
     }
-    Streams {
-        out: out.into_bytes(),
-        err: errs.into_bytes(),
-        status,
-    }
+    r.out = out.into_bytes();
+    r
 }
 
 // ------------------------------------------------------------------ reading files
@@ -339,51 +327,50 @@ fn read_file(sh: &mut Shell, name: &str) -> Result<Vec<u8>, FsError> {
     sh.fs.read(&abs).map(<[u8]>::to_vec)
 }
 
-/// `cmd: name: reason`, the common coreutils shape.
-fn read_for(sh: &mut Shell, cmd: &str, name: &str) -> Result<Vec<u8>, String> {
-    read_file(sh, name).map_err(|e| err(cmd, name, e))
+/// The inputs of a command like `cat`: each named file (`-` or no names means
+/// stdin) with its contents. A file that cannot be read is reported on `r`
+/// with exit status `status`, using `fail` for the wording, and skipped.
+fn inputs(
+    sh: &mut Shell,
+    files: &[String],
+    stdin: &[u8],
+    r: &mut Streams,
+    status: i32,
+    fail: impl Fn(&str, FsError) -> String,
+) -> Vec<(String, Vec<u8>)> {
+    if files.is_empty() {
+        return vec![("-".into(), stdin.to_vec())];
+    }
+    let mut found = Vec::new();
+    for f in files {
+        let data = if f == "-" {
+            Ok(stdin.to_vec())
+        } else {
+            read_file(sh, f)
+        };
+        match data {
+            Ok(d) => found.push((f.clone(), d)),
+            Err(e) => r.error(status, fail(f, e)),
+        }
+    }
+    found
 }
 
 pub(crate) fn cat(sh: &mut Shell, args: &[String], stdin: &[u8]) -> Streams {
     let (flags, _, files) = split_flags(args);
-    let number = flags.contains('n');
-    let mut out = Vec::new();
-    let mut errs = String::new();
-    let mut status = 0;
-    let inputs: Vec<&str> = if files.is_empty() {
-        vec!["-"]
-    } else {
-        files.iter().map(String::as_str).collect()
-    };
-    for f in inputs {
-        let data = if f == "-" {
-            stdin.to_vec()
-        } else {
-            match read_for(sh, "cat", f) {
-                Ok(d) => d,
-                Err(e) => {
-                    errs.push_str(&e);
-                    status = 1;
-                    continue;
-                }
-            }
-        };
-        out.extend(data);
+    let mut r = Streams::default();
+    for (_, data) in inputs(sh, &files, stdin, &mut r, 1, |n, e| err("cat", n, e)) {
+        r.out.extend(data);
     }
-    if number {
-        let text = String::from_utf8_lossy(&out).into_owned();
-        out = text
+    if flags.contains('n') {
+        let text = String::from_utf8_lossy(&r.out).into_owned();
+        let numbered = text
             .lines()
             .enumerate()
-            .map(|(i, l)| format!("{:>6}\t{l}\n", i + 1))
-            .collect::<String>()
-            .into_bytes();
+            .map(|(i, l)| format!("{:>6}\t{l}\n", i + 1));
+        r.out = numbered.collect::<String>().into_bytes();
     }
-    Streams {
-        out,
-        err: errs.into_bytes(),
-        status,
-    }
+    r
 }
 
 pub(crate) fn head_tail(sh: &mut Shell, args: &[String], stdin: &[u8], head: bool) -> Streams {
@@ -391,6 +378,7 @@ pub(crate) fn head_tail(sh: &mut Shell, args: &[String], stdin: &[u8], head: boo
     let (mut count, mut files) = (10usize, Vec::new());
     let mut it = args.iter();
     while let Some(a) = it.next() {
+        let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
         if a == "-n" {
             count = it
                 .next()
@@ -398,54 +386,39 @@ pub(crate) fn head_tail(sh: &mut Shell, args: &[String], stdin: &[u8], head: boo
                 .unwrap_or(10);
         } else if let Some(n) = a.strip_prefix("-n") {
             count = n.parse().unwrap_or(10);
-        } else if a.len() > 1 && a.starts_with('-') && a[1..].chars().all(|c| c.is_ascii_digit()) {
+        } else if digits(a.trim_start_matches('-')) && a.starts_with('-') {
             count = a[1..].parse().unwrap_or(10);
-        } else if a.starts_with('-') && a.len() > 1 {
-            // -f, -q, ...: nothing to follow or silence here
-        } else {
+        } else if !a.starts_with('-') || a == "-" {
             files.push(a.clone());
-        }
+        } // other flags (-f, -q) have nothing to follow or silence here
     }
-    let (mut out, mut errs, mut status) = (Vec::new(), String::new(), 0);
-    let inputs: Vec<String> = if files.is_empty() {
-        vec!["-".into()]
-    } else {
-        files.clone()
-    };
-    for (i, f) in inputs.iter().enumerate() {
-        let data = if f == "-" {
-            stdin.to_vec()
-        } else {
-            match read_file(sh, f) {
-                Ok(d) => d,
-                Err(e) => {
-                    errs.push_str(&format!(
-                        "{cmd}: cannot open '{f}' for reading: {}\n",
-                        e.message()
-                    ));
-                    status = 1;
-                    continue;
-                }
-            }
-        };
-        if inputs.len() > 1 {
-            out.extend(format!("{}==> {f} <==\n", if i > 0 { "\n" } else { "" }).into_bytes());
+    let mut r = Streams::default();
+    let found = inputs(sh, &files, stdin, &mut r, 1, |n, e| {
+        format!("{cmd}: cannot open '{n}' for reading: {}", e.message())
+    });
+    for (i, (name, data)) in found.iter().enumerate() {
+        if files.len() > 1 {
+            r.out
+                .extend(format!("{}==> {name} <==\n", if i > 0 { "\n" } else { "" }).bytes());
         }
-        let text = String::from_utf8_lossy(&data);
+        let text = String::from_utf8_lossy(data);
         let lines: Vec<&str> = text.split_inclusive('\n').collect();
-        let picked: Vec<&str> = if head {
-            lines.into_iter().take(count).collect()
+        let skip = if head {
+            0
         } else {
-            let skip = lines.len().saturating_sub(count);
-            lines.into_iter().skip(skip).collect()
+            lines.len().saturating_sub(count)
         };
-        out.extend(picked.concat().into_bytes());
+        let take = if head { count } else { usize::MAX };
+        r.out.extend(
+            lines
+                .into_iter()
+                .skip(skip)
+                .take(take)
+                .collect::<String>()
+                .bytes(),
+        );
     }
-    Streams {
-        out,
-        err: errs.into_bytes(),
-        status,
-    }
+    r
 }
 
 pub(crate) fn wc(sh: &mut Shell, args: &[String], stdin: &[u8]) -> Streams {
@@ -456,19 +429,20 @@ pub(crate) fn wc(sh: &mut Shell, args: &[String], stdin: &[u8]) -> Streams {
         flags.contains('c') || flags.contains('m'),
     );
     let all = !(l || w || c);
-    let fmt = |data: &[u8], label: Option<&str>| {
-        let text = String::from_utf8_lossy(data);
+    let mut r = Streams::default();
+    for (name, data) in inputs(sh, &files, stdin, &mut r, 1, |n, e| err("wc", n, e)) {
         let mut fields = Vec::new();
         if l || all {
             fields.push(data.iter().filter(|b| **b == b'\n').count());
         }
         if w || all {
-            fields.push(text.split_whitespace().count());
+            fields.push(String::from_utf8_lossy(&data).split_whitespace().count());
         }
         if c || all {
             fields.push(data.len());
         }
-        let width = if fields.len() > 1 || label.is_some() {
+        // GNU pads counts to a fixed width unless it is a lone number from stdin.
+        let width = if fields.len() > 1 || !files.is_empty() {
             7
         } else {
             0
@@ -478,30 +452,12 @@ pub(crate) fn wc(sh: &mut Shell, args: &[String], stdin: &[u8]) -> Streams {
             .map(|n| format!("{n:>width$}"))
             .collect::<Vec<_>>()
             .join(" ");
-        if let Some(l) = label {
-            line.push(' ');
-            line.push_str(l);
+        if !files.is_empty() {
+            line = format!("{line} {name}");
         }
-        line + "\n"
-    };
-    if files.is_empty() {
-        return Streams::out(fmt(stdin, None));
+        r.out.extend(format!("{line}\n").bytes());
     }
-    let (mut out, mut errs, mut status) = (String::new(), String::new(), 0);
-    for f in &files {
-        match read_for(sh, "wc", f) {
-            Ok(d) => out.push_str(&fmt(&d, Some(f))),
-            Err(e) => {
-                errs.push_str(&e);
-                status = 1;
-            }
-        }
-    }
-    Streams {
-        out: out.into_bytes(),
-        err: errs.into_bytes(),
-        status,
-    }
+    r
 }
 
 pub(crate) fn grep(sh: &mut Shell, args: &[String], stdin: &[u8]) -> Streams {
@@ -524,102 +480,71 @@ pub(crate) fn grep(sh: &mut Shell, args: &[String], stdin: &[u8]) -> Streams {
         patterns.push(rest.remove(0));
     }
     let has = |c| flags.contains(c);
-    let body = patterns
-        .iter()
-        .map(|p| {
-            if has('F') {
-                regex::escape(p)
-            } else {
-                p.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("|");
+    let alternatives = patterns.iter().map(|p| {
+        if has('F') {
+            regex::escape(p)
+        } else {
+            p.clone()
+        }
+    });
+    let body = alternatives.collect::<Vec<_>>().join("|");
     let body = if has('w') {
         format!(r"\b(?:{body})\b")
     } else {
         body
     };
-    let re = match RegexBuilder::new(&body)
+    let Ok(re) = RegexBuilder::new(&body)
         .case_insensitive(has('i'))
         .size_limit(1 << 20)
         .build()
-    {
-        Ok(r) => r,
-        Err(_) => return Streams::fail(2, "grep: Invalid regular expression"),
+    else {
+        return Streams::fail(2, "grep: Invalid regular expression");
     };
 
-    let inputs: Vec<String> = if rest.is_empty() {
-        vec!["-".into()]
-    } else {
-        rest.clone()
-    };
-    let prefix = inputs.len() > 1 && !has('h');
-    let (mut out, mut errs, mut matched, mut status) = (String::new(), String::new(), false, 0);
-    for f in &inputs {
-        let data = if f == "-" {
-            stdin.to_vec()
+    let mut r = Streams::default();
+    let prefix = rest.len() > 1 && !has('h');
+    let mut matched = false;
+    for (name, data) in inputs(sh, &rest, stdin, &mut r, 2, |n, e| err("grep", n, e)) {
+        let label = if prefix {
+            format!("{name}:")
         } else {
-            match read_for(sh, "grep", f) {
-                Ok(d) => d,
-                Err(e) => {
-                    errs.push_str(&e);
-                    status = 2;
-                    continue;
-                }
-            }
+            String::new()
         };
-        let text = String::from_utf8_lossy(&data);
         let mut count = 0;
-        for (n, line) in text.lines().enumerate() {
+        for (n, line) in String::from_utf8_lossy(&data).lines().enumerate() {
             if re.is_match(line) == has('v') {
                 continue;
             }
             count += 1;
-            matched = true;
             if has('c') || has('q') {
                 continue;
             }
-            let label = if prefix {
-                format!("{f}:")
-            } else {
-                String::new()
-            };
             let num = if has('n') {
                 format!("{}:", n + 1)
             } else {
                 String::new()
             };
-            if has('o') {
-                for m in re.find_iter(line) {
-                    out.push_str(&format!("{label}{num}{}\n", m.as_str()));
-                }
+            let shown: Vec<&str> = if has('o') {
+                re.find_iter(line).map(|m| m.as_str()).collect()
             } else {
-                out.push_str(&format!("{label}{num}{line}\n"));
+                vec![line]
+            };
+            for text in shown {
+                r.out.extend(format!("{label}{num}{text}\n").bytes());
             }
         }
+        matched |= count > 0;
         if has('c') && !has('q') {
-            out.push_str(&format!(
-                "{}{count}\n",
-                if prefix {
-                    format!("{f}:")
-                } else {
-                    String::new()
-                }
-            ));
+            r.out.extend(format!("{label}{count}\n").bytes());
         }
-    }
-    if status == 0 && !matched {
-        status = 1;
     }
     if has('q') && matched {
         return Streams::default();
     }
-    Streams {
-        out: out.into_bytes(),
-        err: errs.into_bytes(),
-        status,
+    if r.status == 0 && !matched {
+        r.status = 1;
     }
+    r
 }
 
 // ------------------------------------------------------------------ changing files
@@ -632,29 +557,22 @@ pub(crate) fn touch(sh: &mut Shell, args: &[String]) -> Streams {
             "touch: missing file operand\nTry 'touch --help' for more information.",
         );
     }
-    let (mut errs, mut status) = (String::new(), 0);
+    let mut r = Streams::default();
     for f in &files {
         let abs = sh.abs(f);
-        let result = if sh.fs.exists(&abs) {
-            if sh.fs.can_write(&abs, sh.actor()) {
-                let now = sh.now();
-                sh.fs.set_mtime(&abs, now)
-            } else {
-                Err(FsError::Denied)
-            }
-        } else {
+        let result = if !sh.fs.exists(&abs) {
             sh.write_file(&abs, b"", true)
+        } else if sh.fs.can_write(&abs, sh.actor()) {
+            let now = sh.now();
+            sh.fs.set_mtime(&abs, now)
+        } else {
+            Err(FsError::Denied)
         };
         if let Err(e) = result {
-            errs.push_str(&format!("touch: cannot touch '{f}': {}\n", e.message()));
-            status = 1;
+            r.error(1, format!("touch: cannot touch '{f}': {}", e.message()));
         }
     }
-    Streams {
-        err: errs.into_bytes(),
-        status,
-        ..Streams::default()
-    }
+    r
 }
 
 pub(crate) fn mkdir(sh: &mut Shell, args: &[String]) -> Streams {
@@ -666,25 +584,22 @@ pub(crate) fn mkdir(sh: &mut Shell, args: &[String]) -> Streams {
             "mkdir: missing operand\nTry 'mkdir --help' for more information.",
         );
     }
-    let (mut errs, mut status) = (String::new(), 0);
+    let mut r = Streams::default();
     for d in &dirs {
         let abs = sh.abs(d);
-        let mut path = String::new();
         let comps: Vec<&str> = abs.split('/').filter(|c| !c.is_empty()).collect();
+        let mut path = String::new();
         for (i, c) in comps.iter().enumerate() {
             path.push('/');
             path.push_str(c);
             let last = i + 1 == comps.len();
-            if sh.fs.is_dir(&path) {
+            let result = if sh.fs.is_dir(&path) {
                 if last && !parents {
-                    errs.push_str(&format!(
-                        "mkdir: cannot create directory ‘{d}’: File exists\n"
-                    ));
-                    status = 1;
+                    Err(FsError::Exists)
+                } else {
+                    continue;
                 }
-                continue;
-            }
-            let result = if sh.fs.exists(&path) {
+            } else if sh.fs.exists(&path) {
                 Err(FsError::Exists)
             } else if !last && !parents {
                 Err(FsError::NotFound)
@@ -695,20 +610,15 @@ pub(crate) fn mkdir(sh: &mut Shell, args: &[String]) -> Streams {
                 sh.fs.mkdir(&path, meta)
             };
             if let Err(e) = result {
-                errs.push_str(&format!(
-                    "mkdir: cannot create directory ‘{d}’: {}\n",
-                    e.message()
-                ));
-                status = 1;
+                r.error(
+                    1,
+                    format!("mkdir: cannot create directory ‘{d}’: {}", e.message()),
+                );
                 break;
             }
         }
     }
-    Streams {
-        err: errs.into_bytes(),
-        status,
-        ..Streams::default()
-    }
+    r
 }
 
 pub(crate) fn rm(sh: &mut Shell, args: &[String]) -> Streams {
@@ -718,16 +628,14 @@ pub(crate) fn rm(sh: &mut Shell, args: &[String]) -> Streams {
     let force = flags.contains('f') || longs.iter().any(|l| l == "force");
     let no_preserve = longs.iter().any(|l| l == "no-preserve-root");
     if paths.is_empty() {
+        let missing = "rm: missing operand\nTry 'rm --help' for more information.";
         return if force {
             Streams::default()
         } else {
-            Streams::fail(
-                1,
-                "rm: missing operand\nTry 'rm --help' for more information.",
-            )
+            Streams::fail(1, missing)
         };
     }
-    let (mut errs, mut status) = (String::new(), 0);
+    let mut r = Streams::default();
     for p in &paths {
         let abs = sh.abs(p);
         let top_level = abs.matches('/').count() == 1;
@@ -736,9 +644,9 @@ pub(crate) fn rm(sh: &mut Shell, args: &[String]) -> Streams {
         }
         if abs == "/" {
             if !recursive {
-                errs.push_str("rm: cannot remove '/': Is a directory\n");
+                r.error(1, "rm: cannot remove '/': Is a directory");
             } else if !no_preserve {
-                errs.push_str("rm: it is dangerous to operate recursively on '/'\nrm: use --no-preserve-root to override this failsafe\n");
+                r.error(1, "rm: it is dangerous to operate recursively on '/'\nrm: use --no-preserve-root to override this failsafe");
             } else if sh.user.is_root() {
                 let names: Vec<String> = sh
                     .fs
@@ -747,47 +655,29 @@ pub(crate) fn rm(sh: &mut Shell, args: &[String]) -> Streams {
                     .iter()
                     .map(|(n, _)| format!("/{n}"))
                     .collect();
-                for n in names {
-                    let _ = sh.fs.remove(&n, true);
+                for n in &names {
+                    let _ = sh.fs.remove(n, true);
                 }
-                continue;
             } else {
-                errs.push_str("rm: cannot remove '/': Permission denied\n");
-            }
-            status = 1;
-            continue;
-        }
-        let Some(node) = sh.fs.node(&abs) else {
-            if !force {
-                errs.push_str(&format!(
-                    "rm: cannot remove '{p}': No such file or directory\n"
-                ));
-                status = 1;
+                r.error(1, "rm: cannot remove '/': Permission denied");
             }
             continue;
+        }
+        let result = match sh.fs.node(&abs) {
+            None => Err(FsError::NotFound),
+            Some(n) if n.is_dir() && !recursive => Err(FsError::IsADirectory),
+            Some(_) if !sh.fs.can_write(&abs, sh.actor()) => Err(FsError::Denied),
+            Some(_) => sh.fs.remove(&abs, recursive),
         };
-        let is_dir = node.is_dir();
-        let result = if is_dir && !recursive {
-            Err(FsError::IsADirectory)
-        } else if !sh.fs.can_write(&abs, sh.actor()) {
-            Err(FsError::Denied)
-        } else {
-            sh.fs.remove(&abs, recursive)
-        };
-        if let Err(e) = result {
-            if !(force && e == FsError::NotFound) {
-                errs.push_str(&format!("rm: cannot remove '{p}': {}\n", e.message()));
-                status = 1;
+        match result {
+            Ok(()) => {
+                sh.created.remove(&abs);
             }
-        } else {
-            sh.created.remove(&abs);
+            Err(FsError::NotFound) if force => {}
+            Err(e) => r.error(1, format!("rm: cannot remove '{p}': {}", e.message())),
         }
     }
-    Streams {
-        err: errs.into_bytes(),
-        status,
-        ..Streams::default()
-    }
+    r
 }
 
 /// Resolve the destination of `cp`/`mv`: into the directory if it is one.
@@ -801,12 +691,11 @@ fn destination(sh: &Shell, src: &str, dst: &str) -> String {
     }
 }
 
+/// Why a `cp`/`mv` could not happen.
 enum Xfer {
-    /// The source does not exist.
     NoSource,
     /// `cp` of a directory without `-r`.
     OmitDir,
-    /// Anything wrong with the destination or permissions.
     Fs(FsError),
 }
 
@@ -836,45 +725,42 @@ fn move_or_copy(
     done.map_err(Xfer::Fs)
 }
 
-fn transfer(sh: &mut Shell, args: &[String], moving: bool) -> Streams {
+pub(crate) fn transfer(sh: &mut Shell, args: &[String], moving: bool) -> Streams {
     let cmd = if moving { "mv" } else { "cp" };
     let (flags, longs, paths) = split_flags(args);
-    let recursive = flags.contains('r')
-        || flags.contains('R')
-        || flags.contains('a')
+    let recursive = ['r', 'R', 'a'].iter().any(|c| flags.contains(*c))
         || longs.iter().any(|l| l == "recursive");
-    if paths.len() < 2 {
-        let msg = if paths.is_empty() {
-            format!("{cmd}: missing file operand")
-        } else {
-            format!(
-                "{cmd}: missing destination file operand after '{}'",
-                paths[0]
+    let usage = format!("\nTry '{cmd} --help' for more information.");
+    match paths.len() {
+        0 => return Streams::fail(1, format!("{cmd}: missing file operand{usage}")),
+        1 => {
+            return Streams::fail(
+                1,
+                format!(
+                    "{cmd}: missing destination file operand after '{}'{usage}",
+                    paths[0]
+                ),
             )
-        };
-        return Streams::fail(
-            1,
-            format!("{msg}\nTry '{cmd} --help' for more information."),
-        );
+        }
+        _ => {}
     }
     let (srcs, dst) = paths.split_at(paths.len() - 1);
     let dst = &dst[0];
     if srcs.len() > 1 && !sh.fs.is_dir(&sh.abs(dst)) {
         return Streams::fail(1, format!("{cmd}: target '{dst}' is not a directory"));
     }
-    let (mut errs, mut status) = (String::new(), 0);
+    let mut r = Streams::default();
     for s in srcs {
-        let from = sh.abs(s);
-        let to = destination(sh, s, dst);
-        let result = move_or_copy(sh, &from, &to, moving, recursive);
-        match result {
+        let (from, to) = (sh.abs(s), destination(sh, s, dst));
+        match move_or_copy(sh, &from, &to, moving, recursive) {
             Ok(()) => {
-                let (user, now) = (sh.user.name.clone(), sh.now());
                 if moving {
                     if sh.created.remove(&from) {
                         sh.created.insert(to.clone());
                     }
                 } else {
+                    // a copy belongs to whoever made it, and is new
+                    let (user, now) = (sh.user.name.clone(), sh.now());
                     let _ = sh.fs.set_owner(&to, &user, &user);
                     let _ = sh.fs.set_mtime(&to, now);
                     sh.created.insert(to.clone());
@@ -882,15 +768,12 @@ fn transfer(sh: &mut Shell, args: &[String], moving: bool) -> Streams {
                 sh.note_write(&to);
             }
             Err(Xfer::OmitDir) => {
-                errs.push_str(&format!("cp: -r not specified; omitting directory '{s}'\n"));
-                status = 1;
+                r.error(1, format!("cp: -r not specified; omitting directory '{s}'"))
             }
-            Err(Xfer::NoSource) => {
-                errs.push_str(&format!(
-                    "{cmd}: cannot stat '{s}': No such file or directory\n"
-                ));
-                status = 1;
-            }
+            Err(Xfer::NoSource) => r.error(
+                1,
+                format!("{cmd}: cannot stat '{s}': No such file or directory"),
+            ),
             Err(Xfer::Fs(e)) => {
                 // GNU cp names only the destination; mv names both.
                 let what = if moving {
@@ -898,24 +781,11 @@ fn transfer(sh: &mut Shell, args: &[String], moving: bool) -> Streams {
                 } else {
                     format!("cannot create regular file '{dst}'")
                 };
-                errs.push_str(&format!("{cmd}: {what}: {}\n", e.message()));
-                status = 1;
+                r.error(1, format!("{cmd}: {what}: {}", e.message()));
             }
         }
     }
-    Streams {
-        err: errs.into_bytes(),
-        status,
-        ..Streams::default()
-    }
-}
-
-pub(crate) fn cp(sh: &mut Shell, args: &[String]) -> Streams {
-    transfer(sh, args, false)
-}
-
-pub(crate) fn mv(sh: &mut Shell, args: &[String]) -> Streams {
-    transfer(sh, args, true)
+    r
 }
 
 /// Apply a `chmod` mode (octal like `755`, or symbolic like `u+x`, `a-w`,
@@ -961,30 +831,35 @@ fn apply_mode(spec: &str, old: u32) -> Option<u32> {
     Some(mode)
 }
 
+/// `chmod MODE FILE...` and `chown OWNER FILE...`: the first operand is the
+/// change, the rest are the files. Returns None (after reporting) if the
+/// operands are incomplete.
+fn change_operands<'a>(cmd: &str, rest: &'a [String]) -> Result<(&'a str, &'a [String]), Streams> {
+    let usage = format!("\nTry '{cmd} --help' for more information.");
+    match rest.split_first() {
+        None => Err(Streams::fail(1, format!("{cmd}: missing operand{usage}"))),
+        Some((spec, [])) => Err(Streams::fail(
+            1,
+            format!("{cmd}: missing operand after '{spec}'{usage}"),
+        )),
+        Some((spec, files)) => Ok((spec, files)),
+    }
+}
+
 pub(crate) fn chmod(sh: &mut Shell, args: &[String]) -> Streams {
     let (_, _, rest) = split_flags(args);
-    let Some((spec, files)) = rest.split_first() else {
-        return Streams::fail(
-            1,
-            "chmod: missing operand\nTry 'chmod --help' for more information.",
-        );
+    let (spec, files) = match change_operands("chmod", &rest) {
+        Ok(ok) => ok,
+        Err(usage) => return usage,
     };
-    if files.is_empty() {
-        return Streams::fail(
-            1,
-            format!(
-                "chmod: missing operand after '{spec}'\nTry 'chmod --help' for more information."
-            ),
-        );
-    }
-    let (mut errs, mut status) = (String::new(), 0);
+    let mut r = Streams::default();
     for f in files {
         let abs = sh.abs(f);
         let Some(node) = sh.fs.node(&abs) else {
-            errs.push_str(&format!(
-                "chmod: cannot access '{f}': No such file or directory\n"
-            ));
-            status = 1;
+            r.error(
+                1,
+                format!("chmod: cannot access '{f}': No such file or directory"),
+            );
             continue;
         };
         let (old, owner) = (node.meta.mode, node.meta.owner.clone());
@@ -995,70 +870,53 @@ pub(crate) fn chmod(sh: &mut Shell, args: &[String]) -> Streams {
             );
         };
         if !sh.user.is_root() && owner != sh.user.name {
-            errs.push_str(&format!(
-                "chmod: changing permissions of '{f}': Operation not permitted\n"
-            ));
-            status = 1;
+            r.error(
+                1,
+                format!("chmod: changing permissions of '{f}': Operation not permitted"),
+            );
             continue;
         }
         let _ = sh.fs.set_mode(&abs, (old & !0o777) | new);
     }
-    Streams {
-        err: errs.into_bytes(),
-        status,
-        ..Streams::default()
-    }
+    r
 }
 
 pub(crate) fn chown(sh: &mut Shell, args: &[String]) -> Streams {
     let (_, _, rest) = split_flags(args);
-    let Some((owner, files)) = rest.split_first() else {
-        return Streams::fail(
-            1,
-            "chown: missing operand\nTry 'chown --help' for more information.",
-        );
+    let (owner, files) = match change_operands("chown", &rest) {
+        Ok(ok) => ok,
+        Err(usage) => return usage,
     };
     let (user, group) = owner
         .split_once([':', '.'])
-        .map_or((owner.as_str(), None), |(u, g)| (u, Some(g)));
-    let mut errs = String::new();
-    let mut status = 0;
+        .map_or((owner, ""), |(u, g)| (u, g));
+    let mut r = Streams::default();
     for f in files {
         let abs = sh.abs(f);
-        if !sh.fs.exists(&abs) {
-            errs.push_str(&format!(
-                "chown: cannot access '{f}': No such file or directory\n"
-            ));
-            status = 1;
-        } else if !sh.user.is_root() {
-            errs.push_str(&format!(
-                "chown: changing ownership of '{f}': Operation not permitted\n"
-            ));
-            status = 1;
-        } else {
-            let user = if user.is_empty() {
-                sh.fs
-                    .node(&abs)
-                    .map(|n| n.meta.owner.clone())
-                    .unwrap_or_default()
-            } else {
-                user.to_string()
-            };
-            let group = group.map_or_else(
-                || {
-                    sh.fs
-                        .node(&abs)
-                        .map(|n| n.meta.group.clone())
-                        .unwrap_or_default()
-                },
-                str::to_string,
+        let Some(node) = sh.fs.node(&abs) else {
+            r.error(
+                1,
+                format!("chown: cannot access '{f}': No such file or directory"),
             );
-            let _ = sh.fs.set_owner(&abs, &user, &group);
+            continue;
+        };
+        if !sh.user.is_root() {
+            r.error(
+                1,
+                format!("chown: changing ownership of '{f}': Operation not permitted"),
+            );
+            continue;
         }
+        // an omitted user or group is left as it was
+        let keep = |new: &str, old: &str| {
+            if new.is_empty() {
+                old.to_string()
+            } else {
+                new.to_string()
+            }
+        };
+        let (user, group) = (keep(user, &node.meta.owner), keep(group, &node.meta.group));
+        let _ = sh.fs.set_owner(&abs, &user, &group);
     }
-    Streams {
-        err: errs.into_bytes(),
-        status,
-        ..Streams::default()
-    }
+    r
 }

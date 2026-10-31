@@ -31,6 +31,6 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-russh = { version = "0.65", default-features = false, features = ["ring", "flate2", "rsa"] }
+russh = { version = "0.65", default-features = false, features = ["ring"] }
 serde_json.workspace = true
 async-trait.workspace = true
