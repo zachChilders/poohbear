@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use hp_core::{AsyncStream, Protocol, SessionCtx};
-use serde_json::json;
+use hp_log::{Limit, Record};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub struct Banner;
@@ -24,7 +24,7 @@ impl Protocol for Banner {
         if let Some(b) = &ctx.persona.banner {
             let out = format!("{b}\r\n");
             stream.write_all(out.as_bytes()).await?;
-            ctx.log.bytes("tx", out.as_bytes());
+            ctx.log.event(Record::tx(out.as_bytes()));
         }
         let mut total: u64 = 0;
         let mut buf = [0u8; 4096];
@@ -35,13 +35,13 @@ impl Protocol for Banner {
             }
             total += n as u64;
             if total > ctx.limits.max_input_bytes {
-                ctx.log.record(
-                    "limit_exceeded",
-                    json!({ "limit": "max_input_bytes", "total": total }),
-                );
+                ctx.log.event(Record::LimitExceeded {
+                    limit: Limit::MaxInputBytes,
+                    total,
+                });
                 break;
             }
-            ctx.log.bytes("rx", &buf[..n]);
+            ctx.log.event(Record::rx(&buf[..n]));
         }
         Ok(())
     }

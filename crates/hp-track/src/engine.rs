@@ -10,8 +10,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use hp_core::{Action, Event};
 
+use crate::event::{self, EventKind};
 use crate::expr::Value;
-use crate::track::{Delay, EventKind, Rule, Setter, Step, Track};
+use crate::model::{Delay, Rule, Setter, Step, Track};
 
 /// Longest string a variable may hold; keeps a hostile session from growing memory.
 const MAX_VAR_LEN: usize = 64 * 1024;
@@ -55,7 +56,7 @@ impl Session {
     pub fn step(&mut self, ev: &Event) -> Outcome {
         let track = self.track.clone();
         let mut out = Outcome::default();
-        let (kind, mut env) = event_env(ev);
+        let (kind, mut env) = event::bind(ev);
         let Some(state) = track.states.get(&self.state) else {
             out.errors
                 .push(format!("session is in unknown state `{}`", self.state));
@@ -172,38 +173,6 @@ impl Session {
         }
         d.min + Duration::from_millis(self.rng.next() % (span + 1))
     }
-}
-
-/// Bind the variables an event exposes to matchers and expressions.
-fn event_env(ev: &Event) -> (EventKind, HashMap<String, Value>) {
-    let mut env = HashMap::new();
-    let s = |x: &str| Value::Str(x.to_string());
-    let kind = match ev {
-        Event::Connected => EventKind::Connected,
-        Event::Disconnected => EventKind::Disconnected,
-        Event::AuthAttempt { user, secret } => {
-            env.insert("user".into(), s(user));
-            env.insert("password".into(), s(secret.expose()));
-            EventKind::AuthAttempt
-        }
-        Event::Command(c) => {
-            env.insert("command".into(), s(c));
-            env.insert("argv0".into(), s(c.split_whitespace().next().unwrap_or("")));
-            EventKind::Command
-        }
-        Event::Request { op, .. } => {
-            env.insert("op".into(), s(op));
-            EventKind::Request
-        }
-        Event::Raw(b) => {
-            env.insert(
-                "raw".into(),
-                Value::Str(String::from_utf8_lossy(b).into_owned()),
-            );
-            EventKind::Raw
-        }
-    };
-    (kind, env)
 }
 
 struct SplitMix64(u64);

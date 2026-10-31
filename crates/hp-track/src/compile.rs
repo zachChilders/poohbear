@@ -1,22 +1,17 @@
-//! Track YAML schema, compilation and load-time validation.
-//!
-//! Loading is all-or-nothing: every problem found is reported together, and
-//! the honeypot refuses to start with an invalid track.
+//! Validation: turns the raw schema into the runtime model, collecting
+//! every problem instead of stopping at the first. Loading is
+//! all-or-nothing; the honeypot refuses to start with an invalid track.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
-use std::path::Path;
-use std::time::Duration;
 
 use regex::Regex;
-use serde::de::Error as _;
-use serde::Deserialize;
 use serde_yaml::Value as Yaml;
 
-use crate::expr::{self, Expr, Template, Value};
-
-/// Names the engine binds from the current event; usable in any expression.
-pub const EVENT_VARS: &[&str] = &["user", "password", "command", "argv0", "op", "raw"];
+use crate::event::{EventKind, EVENT_VARS};
+use crate::expr::{self, Template, Value};
+use crate::model::{Delay, Matcher, Rule, Setter, State, Step, Track};
+use crate::schema::{fallback_steps, RawMatch, RawRule, RawState, RawStep, RawTrack};
 
 #[derive(Debug)]
 pub struct TrackError(pub Vec<String>);
@@ -32,169 +27,20 @@ impl fmt::Display for TrackError {
 }
 impl std::error::Error for TrackError {}
 
-// ------------------------------------------------------------ raw schema
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawTrack {
-    name: String,
-    #[serde(default)]
-    vars: BTreeMap<String, Yaml>,
-    start: String,
-    states: BTreeMap<String, RawState>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawState {
-    #[serde(default)]
-    on: Vec<RawRule>,
-    fallback: Option<Yaml>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawRule {
-    #[serde(default, rename = "match")]
-    matcher: RawMatch,
-    when: Option<String>,
-    #[serde(default, rename = "do")]
-    steps: Vec<RawStep>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawMatch {
-    event: Option<String>,
-    command: Option<String>,
-    user: Option<String>,
-    password: Option<String>,
-    op: Option<String>,
-    raw: Option<String>,
-}
-
-/// One step: a single-key map such as `{ send: "..." }`.
-struct RawStep(String, Yaml);
-
-impl<'de> Deserialize<'de> for RawStep {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let m = serde_yaml::Mapping::deserialize(d)?;
-        if m.len() != 1 {
-            return Err(D::Error::custom(
-                "each step must be a map with exactly one key",
-            ));
-        }
-        let (k, v) = m.into_iter().next().unwrap();
-        let k = k
-            .as_str()
-            .ok_or_else(|| D::Error::custom("step name must be a string"))?
-            .to_string();
-        Ok(RawStep(k, v))
+/// Parse and validate track YAML.
+pub(crate) fn compile(src: &str) -> Result<Track, TrackError> {
+    let raw: RawTrack = serde_yaml::from_str(src).map_err(|e| TrackError(vec![e.to_string()]))?;
+    let mut c = Compiler {
+        errs: vec![],
+        edges: BTreeMap::new(),
+    };
+    let track = c.compile(raw);
+    if c.errs.is_empty() {
+        Ok(track)
+    } else {
+        Err(TrackError(c.errs))
     }
 }
-
-// --------------------------------------------------------- compiled form
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EventKind {
-    Connected,
-    AuthAttempt,
-    Command,
-    Request,
-    Raw,
-    Disconnected,
-}
-
-impl EventKind {
-    fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "connected" => Self::Connected,
-            "auth_attempt" => Self::AuthAttempt,
-            "command" => Self::Command,
-            "request" => Self::Request,
-            "raw" => Self::Raw,
-            "disconnected" => Self::Disconnected,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Debug)]
-pub struct Matcher {
-    pub event: Option<EventKind>,
-    /// (event variable name, regex)
-    pub fields: Vec<(&'static str, Regex)>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Delay {
-    pub min: Duration,
-    pub max: Duration,
-}
-
-#[derive(Debug)]
-pub enum Setter {
-    Lit(Value),
-    Expr(Expr),
-    Template(Template),
-}
-
-#[derive(Debug)]
-pub enum Step {
-    Send(Template),
-    Set(Vec<(String, Setter)>),
-    Delay(Delay),
-    Auth(bool),
-    Goto(String),
-    Tag(String),
-    Close,
-}
-
-#[derive(Debug)]
-pub struct Rule {
-    pub matcher: Matcher,
-    pub when: Option<Expr>,
-    pub steps: Vec<Step>,
-}
-
-#[derive(Debug)]
-pub struct State {
-    pub rules: Vec<Rule>,
-    pub fallback: Vec<Step>,
-}
-
-#[derive(Debug)]
-pub struct Track {
-    pub name: String,
-    pub vars: BTreeMap<String, Value>,
-    pub start: String,
-    pub states: BTreeMap<String, State>,
-}
-
-impl Track {
-    pub fn load(path: &Path) -> Result<Track, TrackError> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| TrackError(vec![format!("reading {}: {e}", path.display())]))?;
-        Track::from_yaml(&text)
-    }
-
-    pub fn from_yaml(src: &str) -> Result<Track, TrackError> {
-        let raw: RawTrack =
-            serde_yaml::from_str(src).map_err(|e| TrackError(vec![e.to_string()]))?;
-        let mut c = Compiler {
-            errs: vec![],
-            edges: BTreeMap::new(),
-        };
-        let track = c.compile(raw);
-        if c.errs.is_empty() {
-            Ok(track)
-        } else {
-            Err(TrackError(c.errs))
-        }
-    }
-}
-
-// ------------------------------------------------------------- compiling
 
 struct Compiler {
     errs: Vec<String>,
@@ -512,24 +358,6 @@ impl Compiler {
     }
 }
 
-/// `fallback:` may be one step map, a multi-key map (steps in key order) or a list.
-fn fallback_steps(v: Yaml) -> Result<Vec<RawStep>, String> {
-    match v {
-        Yaml::Sequence(seq) => seq
-            .into_iter()
-            .map(|s| serde_yaml::from_value(s).map_err(|e| e.to_string()))
-            .collect(),
-        Yaml::Mapping(m) => m
-            .into_iter()
-            .map(|(k, v)| match k {
-                Yaml::String(k) => Ok(RawStep(k, v)),
-                _ => Err("step name must be a string".to_string()),
-            })
-            .collect(),
-        _ => Err("`fallback` must be a step or a list of steps".into()),
-    }
-}
-
 fn parse_delay(s: &str) -> Result<Delay, String> {
     let one = |p: &str| humantime::parse_duration(p.trim()).map_err(|e| format!("{p:?}: {e}"));
     let (min, max) = match s.split_once("..") {
@@ -574,7 +402,7 @@ states:
     #[test]
     fn valid_track_loads() {
         let t = Track::from_yaml(OK).unwrap();
-        assert_eq!(t.states.len(), 2);
+        assert_eq!((t.name(), t.state_count()), ("t", 2));
     }
 
     #[test]

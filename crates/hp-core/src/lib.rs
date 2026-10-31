@@ -80,3 +80,20 @@ pub trait Protocol: Send + Sync {
     fn default_ports(&self) -> &[u16];
     async fn handle(&self, stream: Box<dyn AsyncStream>, ctx: SessionCtx) -> anyhow::Result<()>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_is_redacted_everywhere_except_expose() {
+        let s = Secret::new("hunter2");
+        assert_eq!(format!("{s:?}"), "Secret(***)");
+        let ev = Event::AuthAttempt {
+            user: "root".into(),
+            secret: s.clone(),
+        };
+        assert!(!format!("{ev:?}").contains("hunter2"));
+        assert_eq!(s.expose(), "hunter2");
+    }
+}

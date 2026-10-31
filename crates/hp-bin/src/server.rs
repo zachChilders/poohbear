@@ -8,17 +8,16 @@ use std::time::Duration;
 
 use futures_util::FutureExt;
 use hp_core::{AsyncStream, Limits, Persona, Protocol, SessionCtx};
-use hp_log::LogSink;
-use serde_json::json;
+use hp_log::{LogSink, Record, RejectReason};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
 pub struct Server {
-    pub proto: Arc<dyn Protocol>,
-    pub sink: LogSink,
-    pub limits: Limits,
-    pub persona: Persona,
-    pub permits: Arc<Semaphore>,
+    proto: Arc<dyn Protocol>,
+    sink: LogSink,
+    limits: Limits,
+    persona: Persona,
+    permits: Arc<Semaphore>,
 }
 
 impl Server {
@@ -36,6 +35,11 @@ impl Server {
             persona,
             permits: Arc::new(Semaphore::new(max_sessions)),
         })
+    }
+
+    /// Name of the protocol being served (for startup diagnostics).
+    pub fn protocol_name(&self) -> &'static str {
+        self.proto.name()
     }
 
     pub async fn serve(self: Arc<Self>, listener: TcpListener) {
@@ -56,7 +60,9 @@ impl Server {
         let log = self.sink.session(&id, peer, self.proto.name());
         // Over the cap: drop the connection (closing it) rather than queue.
         let Ok(permit) = self.permits.clone().try_acquire_owned() else {
-            log.record("rejected", json!({ "reason": "max_sessions" }));
+            log.event(Record::Rejected {
+                reason: RejectReason::MaxSessions,
+            });
             return;
         };
         let ctx = SessionCtx {
@@ -68,15 +74,17 @@ impl Server {
         };
         tokio::spawn(async move {
             let _permit = permit;
-            log.event("connect");
+            log.event(Record::Connect);
             let run = AssertUnwindSafe(self.proto.handle(Box::new(stream), ctx)).catch_unwind();
             match tokio::time::timeout(self.limits.session_timeout, run).await {
-                Err(_) => log.event("timeout"),
-                Ok(Err(_)) => log.event("panic"),
-                Ok(Ok(Err(e))) => log.record("error", json!({ "error": e.to_string() })),
+                Err(_) => log.event(Record::Timeout),
+                Ok(Err(_)) => log.event(Record::Panic),
+                Ok(Ok(Err(e))) => log.event(Record::Error {
+                    error: e.to_string(),
+                }),
                 Ok(Ok(Ok(()))) => {}
             }
-            log.event("disconnect");
+            log.event(Record::Disconnect);
         });
     }
 }

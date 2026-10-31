@@ -1,97 +1,125 @@
+//! Configuration boundary. YAML text goes in; a validated, fully typed
+//! [`Config`] comes out. Nothing downstream re-parses strings or re-checks
+//! ranges: durations, sizes and addresses are already real types.
+
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
+use hp_core::{Limits, Persona};
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Validated runtime configuration.
+#[derive(Debug)]
 pub struct Config {
     pub protocol: String,
     pub listen: Vec<SocketAddr>,
-    #[serde(default)]
     pub persona: Persona,
     pub track: Option<PathBuf>,
-    #[serde(default)]
+    /// Per-session limits handed to plugins.
     pub limits: Limits,
-    #[serde(default)]
-    pub logging: Logging,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Persona {
-    pub hostname: Option<String>,
-    pub banner: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Limits {
-    #[serde(default = "d_sessions")]
+    /// Concurrent session cap, enforced by the server.
     pub max_sessions: usize,
-    #[serde(default = "d_timeout")]
-    pub session_timeout: String,
-    #[serde(default = "d_input")]
-    pub max_input_bytes: String,
-}
-fn d_sessions() -> usize {
-    256
-}
-fn d_timeout() -> String {
-    "15m".into()
-}
-fn d_input() -> String {
-    "1MiB".into()
-}
-impl Default for Limits {
-    fn default() -> Self {
-        Self {
-            max_sessions: d_sessions(),
-            session_timeout: d_timeout(),
-            max_input_bytes: d_input(),
-        }
-    }
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Logging {
     /// JSONL session log path; stdout if unset.
-    pub json: Option<PathBuf>,
+    pub session_log: Option<PathBuf>,
 }
 
 impl Config {
-    pub fn load(path: &std::path::Path) -> anyhow::Result<Config> {
+    pub fn load(path: &Path) -> anyhow::Result<Config> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Config::parse(&text)
     }
 
     pub fn parse(text: &str) -> anyhow::Result<Config> {
-        let cfg: Config = serde_yaml::from_str(text).context("parsing config")?;
-        if cfg.listen.is_empty() {
+        let raw: RawConfig = serde_yaml::from_str(text).context("parsing config")?;
+        if raw.listen.is_empty() {
             bail!("`listen` must contain at least one address");
         }
-        if cfg.limits.max_sessions == 0 {
+        if raw.limits.max_sessions == 0 {
             bail!("limits.max_sessions must be > 0");
         }
-        cfg.session_timeout()?;
-        cfg.max_input_bytes()?;
-        Ok(cfg)
-    }
-
-    pub fn session_timeout(&self) -> anyhow::Result<Duration> {
-        humantime::parse_duration(&self.limits.session_timeout).context("limits.session_timeout")
-    }
-
-    pub fn max_input_bytes(&self) -> anyhow::Result<u64> {
-        parse_size(&self.limits.max_input_bytes)
+        Ok(Config {
+            protocol: raw.protocol,
+            listen: raw.listen,
+            persona: Persona {
+                hostname: raw.persona.hostname,
+                banner: raw.persona.banner,
+            },
+            track: raw.track,
+            limits: Limits {
+                session_timeout: humantime::parse_duration(&raw.limits.session_timeout)
+                    .context("limits.session_timeout")?,
+                max_input_bytes: parse_size(&raw.limits.max_input_bytes)
+                    .context("limits.max_input_bytes")?,
+            },
+            max_sessions: raw.limits.max_sessions,
+            session_log: raw.logging.json,
+        })
     }
 }
 
-pub fn parse_size(s: &str) -> anyhow::Result<u64> {
+// ---- on-disk shape (private: only `Config::parse` sees it) ----
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConfig {
+    protocol: String,
+    listen: Vec<SocketAddr>,
+    #[serde(default)]
+    persona: RawPersona,
+    track: Option<PathBuf>,
+    #[serde(default)]
+    limits: RawLimits,
+    #[serde(default)]
+    logging: RawLogging,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPersona {
+    hostname: Option<String>,
+    banner: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLimits {
+    #[serde(default = "default_sessions")]
+    max_sessions: usize,
+    #[serde(default = "default_timeout")]
+    session_timeout: String,
+    #[serde(default = "default_input")]
+    max_input_bytes: String,
+}
+
+fn default_sessions() -> usize {
+    256
+}
+fn default_timeout() -> String {
+    "15m".into()
+}
+fn default_input() -> String {
+    "1MiB".into()
+}
+
+impl Default for RawLimits {
+    fn default() -> Self {
+        RawLimits {
+            max_sessions: default_sessions(),
+            session_timeout: default_timeout(),
+            max_input_bytes: default_input(),
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLogging {
+    json: Option<PathBuf>,
+}
+
+fn parse_size(s: &str) -> anyhow::Result<u64> {
     let s = s.trim();
     let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
     let (num, unit) = s.split_at(split);
@@ -109,34 +137,58 @@ pub fn parse_size(s: &str) -> anyhow::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    const MIN: &str = "protocol: banner\nlisten: ['127.0.0.1:1']\n";
+
     #[test]
     fn sizes() {
         assert_eq!(parse_size("1MiB").unwrap(), 1 << 20);
         assert_eq!(parse_size("512").unwrap(), 512);
+        assert_eq!(parse_size(" 2KiB ").unwrap(), 2048);
         assert!(parse_size("1XB").is_err());
         assert!(parse_size("MiB").is_err());
+        assert!(parse_size("99999999999GiB").is_err());
     }
+
     #[test]
-    fn defaults_and_accessors() {
-        let c = Config::parse("protocol: banner\nlisten: ['127.0.0.1:1']").unwrap();
-        assert_eq!(c.limits.max_sessions, 256);
-        assert_eq!(c.session_timeout().unwrap(), Duration::from_secs(900));
-        assert_eq!(c.max_input_bytes().unwrap(), 1 << 20);
+    fn defaults_are_applied_and_typed() {
+        let c = Config::parse(MIN).unwrap();
+        assert_eq!(c.max_sessions, 256);
+        assert_eq!(c.limits.session_timeout, Duration::from_secs(900));
+        assert_eq!(c.limits.max_input_bytes, 1 << 20);
+        assert!(c.track.is_none() && c.session_log.is_none());
     }
+
     #[test]
-    fn rejects_bad_values() {
-        let base = "protocol: banner\nlisten: ['127.0.0.1:1']\n";
+    fn full_config_maps_every_field() {
+        let c = Config::parse(&format!(
+            "{MIN}persona: {{ hostname: h, banner: b }}\ntrack: t.yaml\n\
+             limits: {{ max_sessions: 3, session_timeout: 30s, max_input_bytes: 2KiB }}\n\
+             logging: {{ json: /tmp/x.jsonl }}"
+        ))
+        .unwrap();
+        assert_eq!(
+            (c.persona.hostname.as_deref(), c.persona.banner.as_deref()),
+            (Some("h"), Some("b"))
+        );
+        assert_eq!(c.track.as_deref(), Some(Path::new("t.yaml")));
+        assert_eq!(c.max_sessions, 3);
+        assert_eq!(c.limits.session_timeout, Duration::from_secs(30));
+        assert_eq!(c.limits.max_input_bytes, 2048);
+        assert_eq!(c.session_log.as_deref(), Some(Path::new("/tmp/x.jsonl")));
+    }
+
+    #[test]
+    fn rejects_bad_values_with_the_offending_key_named() {
+        let err =
+            |extra: &str| format!("{:#}", Config::parse(&format!("{MIN}{extra}")).unwrap_err());
+        assert!(err("limits: { max_sessions: 0 }").contains("max_sessions"));
+        assert!(err("limits: { session_timeout: soon }").contains("session_timeout"));
+        assert!(err("limits: { max_input_bytes: 1XB }").contains("max_input_bytes"));
+        assert!(err("bogus: 1").contains("bogus"));
+        assert!(err("logging: { pcap: x }").contains("pcap"));
         assert!(Config::parse("protocol: banner\nlisten: []").is_err());
-        assert!(Config::parse(&format!("{base}limits: {{ max_sessions: 0 }}")).is_err());
-        assert!(Config::parse(&format!("{base}limits: {{ session_timeout: soon }}")).is_err());
-        assert!(Config::parse(&format!("{base}limits: {{ max_input_bytes: 1XB }}")).is_err());
-        assert!(Config::load(std::path::Path::new("/nonexistent/x.yaml")).is_err());
-    }
-    #[test]
-    fn rejects_unknown_fields() {
-        assert!(serde_yaml::from_str::<Config>(
-            "protocol: banner\nlisten: ['127.0.0.1:1']\nbogus: 1"
-        )
-        .is_err());
+        assert!(Config::load(Path::new("/nonexistent/x.yaml")).is_err());
     }
 }

@@ -235,6 +235,7 @@ dependencies = [
  "serde_yaml",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -246,7 +247,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "hp-log",
- "serde",
  "serde_json",
  "tokio",
 ]
@@ -256,10 +256,10 @@ name = "hp-log"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
