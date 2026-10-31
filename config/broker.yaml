@@ -1,0 +1,12 @@
+# Policy for hp-broker. The honeypot can ask only for a shell (user, command,
+# terminal size); everything else here is fixed by the operator.
+socket: /run/honeypot/broker.sock
+socket_mode: "660"
+image: honeypot/ubuntu-gateway:1
+# runtime: runsc        # gVisor, recommended in production
+hostname: plc-gw-03
+users: [root, admin]
+default_user: admin
+limits: { cpus: 0.5, memory: 256m, pids: 128, tmpfs: 64m }
+max_sandboxes: 16
+session_timeout: 15m

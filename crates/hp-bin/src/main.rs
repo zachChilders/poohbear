@@ -11,6 +11,7 @@ use clap::Parser;
 use config::Config;
 use hp_core::{BehaviorFactory, Passive, Protocol};
 use hp_log::LogSink;
+use hp_sandbox::ContainerBackend;
 use server::{Server, Settings};
 use tokio::net::TcpListener;
 
@@ -26,11 +27,18 @@ struct Cli {
 /// persona-derived setup (e.g. the SSH identification string) validate it
 /// here, so a bad config fails at startup.
 fn plugin(cfg: &Config) -> anyhow::Result<Arc<dyn Protocol>> {
+    if cfg.shell_broker.is_some() && cfg.protocol != "ssh" {
+        anyhow::bail!("`shell` is only supported by the ssh protocol");
+    }
     match cfg.protocol.as_str() {
         "banner" => Ok(Arc::new(hp_proto_banner::Banner)),
-        "ssh" => Ok(Arc::new(hp_proto_ssh::Ssh::new(
-            cfg.persona.banner.as_deref(),
-        )?)),
+        "ssh" => {
+            let ssh = hp_proto_ssh::Ssh::new(cfg.persona.banner.as_deref())?;
+            Ok(Arc::new(match &cfg.shell_broker {
+                Some(socket) => ssh.with_shell_backend(Arc::new(ContainerBackend::new(socket))),
+                None => ssh,
+            }))
+        }
         other => anyhow::bail!("unknown protocol {other:?} (available: banner, ssh)"),
     }
 }
