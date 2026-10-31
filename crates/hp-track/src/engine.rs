@@ -75,7 +75,9 @@ impl Session {
                     .push(format!("state `{}` rule #{}: {e}", self.state, i + 1)),
             }
         }
-        self.run(&state.fallback, &mut env, &mut out);
+        if kind.is_input() {
+            self.run(&state.fallback, &mut env, &mut out);
+        }
         out
     }
 

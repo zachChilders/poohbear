@@ -104,13 +104,11 @@ fn fallback_and_close() {
 }
 
 #[test]
-fn unexpected_event_types_hit_fallback_not_panic() {
+fn unexpected_input_hits_the_fallback_and_never_panics() {
     let mut s = session(1);
-    // Raw bytes / requests / disconnect while in `auth`: fallback closes.
+    // Input of a kind the state has no rule for: the fallback answers (here, closes).
     for ev in [
         Event::Raw(Bytes::from_static(b"\xff\xfe\x00")),
-        Event::Connected,
-        Event::Disconnected,
         Event::Request {
             op: "x".into(),
             args: serde_json_null(),
@@ -189,4 +187,41 @@ states:
     assert!(errors > 0, "growth must eventually be refused");
     let len: usize = sent(&s.step(&cmd("len"))).parse().unwrap();
     assert!(len <= 64 * 1024, "len={len}");
+}
+
+#[test]
+fn lifecycle_events_are_not_answered_by_the_fallback() {
+    // The example's `auth` fallback closes the connection; that must not
+    // fire just because a peer connected or left.
+    let mut s = session(1);
+    for ev in [Event::Connected, Event::Disconnected] {
+        let o = s.step(&ev);
+        assert!(o.actions.is_empty() && o.errors.is_empty(), "{ev:?}: {o:?}");
+    }
+    assert_eq!(s.state(), "auth");
+}
+
+#[test]
+fn rules_can_still_react_to_lifecycle_events() {
+    let t = Track::from_yaml(
+        "
+name: t
+vars: { greeted: 0 }
+start: a
+states:
+  a:
+    on:
+      - match: { event: connected }
+        do: [ { send: 'hello' }, { set: { greeted: 1 } } ]
+      - match: { event: disconnected }
+        do: [ { tag: left } ]
+    fallback: { send: 'fb' }
+",
+    )
+    .unwrap();
+    let mut s = Session::new(Arc::new(t), 0);
+    assert_eq!(sent(&s.step(&Event::Connected)), "hello");
+    assert_eq!(s.vars()["greeted"], Value::Int(1));
+    assert_eq!(s.step(&Event::Disconnected).tags, ["left"]);
+    assert_eq!(sent(&s.step(&cmd("x"))), "fb");
 }
