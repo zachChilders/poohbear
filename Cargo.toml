@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/hp-core", "crates/hp-log", "crates/hp-proto-banner", "crates/hp-bin"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+humantime = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal", "fs", "io-std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+hp-core = { path = "crates/hp-core" }
+hp-log = { path = "crates/hp-log" }
+hp-proto-banner = { path = "crates/hp-proto-banner" }

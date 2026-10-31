@@ -1,0 +1,12 @@
+protocol: banner
+listen:
+  - 127.0.0.1:2323
+persona:
+  hostname: plc-gw-03
+  banner: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6"
+limits:
+  max_sessions: 256
+  session_timeout: 15m
+  max_input_bytes: 1MiB
+logging:
+  json: ./sessions.jsonl
