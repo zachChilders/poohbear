@@ -35,6 +35,11 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::load(&cli.config)?;
     let proto = plugin(&cfg.protocol)
         .ok_or_else(|| anyhow::anyhow!("unknown protocol {:?} (available: banner)", cfg.protocol))?;
+    // Fail closed: an invalid track means the honeypot does not start.
+    if let Some(path) = &cfg.track {
+        let track = hp_track::Track::load(path)?;
+        tracing::info!(track = %track.name, states = track.states.len(), "track loaded");
+    }
     let sink = LogSink::open(cfg.logging.json.as_deref()).await?;
     let limits = Limits { session_timeout: cfg.session_timeout()?, max_input_bytes: cfg.max_input_bytes()? };
     let persona = Persona { hostname: cfg.persona.hostname.clone(), banner: cfg.persona.banner.clone() };

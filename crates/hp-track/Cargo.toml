@@ -1,0 +1,15 @@
+[package]
+name = "hp-track"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+bytes.workspace = true
+hp-core.workspace = true
+humantime.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
