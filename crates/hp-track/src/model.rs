@@ -34,6 +34,10 @@ pub(crate) enum Setter {
 #[derive(Debug)]
 pub(crate) enum Step {
     Send(Template),
+    /// Log the named user in to the emulated host.
+    Login(Template),
+    /// Run a command line in the emulated host and send what it prints.
+    Shell(Template),
     Set(Vec<(String, Setter)>),
     Delay(Delay),
     Auth(bool),

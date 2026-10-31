@@ -538,3 +538,81 @@ async fn a_behavior_can_drop_the_connection_during_auth() {
     let (records, _) = h.finish().await;
     assert_eq!(of_kind(&records, "auth")[0]["accepted"], false);
 }
+
+#[tokio::test]
+async fn the_prompt_comes_from_the_behavior_and_follows_it() {
+    let mut h = start(Opts {
+        script: |e| match e {
+            Event::AuthAttempt { .. } => {
+                vec![Action::AuthResult(true), Action::Prompt("[start] ".into())]
+            }
+            Event::Command(c) if c == "cd" => vec![Action::Prompt("[tmp] ".into())],
+            _ => vec![],
+        },
+        ..Opts::default()
+    })
+    .await;
+    h.login().await;
+    let mut ch = h.client.channel_open_session().await.unwrap();
+    ch.request_pty(true, "xterm", 80, 24, 0, 0, &[])
+        .await
+        .unwrap();
+    ch.request_shell(true).await.unwrap();
+    assert_eq!(
+        read_until(&mut ch, "] ").await,
+        "[start] ",
+        "the first prompt is the one sent with the login"
+    );
+    ch.data_bytes(&b"cd\r"[..]).await.unwrap();
+    assert_eq!(read_until(&mut ch, "] ").await, "cd\r\n[tmp] ");
+    ch.data_bytes(&b"anything\r"[..]).await.unwrap();
+    assert!(
+        read_until(&mut ch, "] ").await.ends_with("[tmp] "),
+        "a behavior that says nothing leaves the prompt alone"
+    );
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn a_hostile_prompt_cannot_carry_terminal_escapes() {
+    let mut h = start(Opts {
+        script: |e| match e {
+            Event::AuthAttempt { .. } => vec![
+                Action::AuthResult(true),
+                Action::Prompt("\x1b[2J\x07evil$ ".into()),
+            ],
+            _ => vec![],
+        },
+        ..Opts::default()
+    })
+    .await;
+    h.login().await;
+    let mut ch = h.client.channel_open_session().await.unwrap();
+    ch.request_pty(true, "xterm", 80, 24, 0, 0, &[])
+        .await
+        .unwrap();
+    ch.request_shell(true).await.unwrap();
+    let prompt = read_until(&mut ch, "$ ").await;
+    assert_eq!(prompt, "?[2J?evil$ ");
+}
+
+#[tokio::test]
+async fn exec_ignores_prompts() {
+    let mut h = start(Opts {
+        script: |e| match e {
+            Event::Command(_) => vec![send("out\n"), Action::Prompt("[p] ".into())],
+            other => script(other),
+        },
+        ..Opts::default()
+    })
+    .await;
+    h.login().await;
+    let mut ch = h.client.channel_open_session().await.unwrap();
+    ch.exec(true, "x").await.unwrap();
+    let (out, status) = read_to_close(&mut ch).await;
+    assert_eq!(
+        (out.as_str(), status),
+        ("out\n", Some(0)),
+        "no prompt without a shell"
+    );
+}

@@ -14,6 +14,7 @@ use crate::cmds::{self, Streams};
 use crate::fs::{normalize, Actor, Fs, FsError, Meta};
 use crate::parse::{self, Command, Join, Pipeline, Redir, Word};
 use crate::spec::{Account, HostSpec};
+use crate::timefmt;
 
 /// Most output a single line may produce.
 const MAX_OUTPUT: usize = 256 * 1024;
@@ -169,6 +170,18 @@ impl Shell {
         self.history = history;
     }
 
+    /// What an interactive login prints before the first prompt, built from
+    /// the spec so it always agrees with `/etc/os-release` and `uname`.
+    pub(crate) fn login_banner(&self) -> String {
+        let (os, kernel) = (&self.spec.os, &self.spec.kernel);
+        // Pretend the last login was a few days ago, from the usual place.
+        let last = timefmt::strftime("%a %b %e %H:%M:%S %Y", self.now() - 3 * 86_400 - 4_127);
+        format!(
+            "Welcome to {} (GNU/Linux {} {})\n\n * Documentation:  https://help.ubuntu.com\n * Management:     https://landscape.canonical.com\n * Support:        https://ubuntu.com/pro\n\nLast login: {last} from {}\n",
+            os.pretty_name, kernel.release, kernel.machine, self.spec.login_from
+        )
+    }
+
     pub fn prompt(&self) -> String {
         let home = &self.user.home;
         let dir = if self.cwd == *home {
@@ -200,6 +213,9 @@ impl Shell {
         data: &[u8],
         append: bool,
     ) -> Result<(), FsError> {
+        // Flag the attempt itself: planting a key that fails because ~/.ssh
+        // does not exist is still someone trying to plant a key.
+        self.note_write(abs);
         if self.fs.is_dir(abs) {
             return Err(FsError::IsADirectory);
         }
@@ -210,7 +226,6 @@ impl Shell {
         let meta = self.new_meta(0o644);
         self.fs.write(abs, data, append, meta)?;
         self.created.insert(abs.to_string());
-        self.note_write(abs);
         Ok(())
     }
 
@@ -548,7 +563,8 @@ impl ShellHost {
 impl Host for ShellHost {
     fn login(&mut self, user: &str) -> HostReply {
         self.sh.login(user);
-        self.reply(Vec::new())
+        let banner = self.sh.login_banner();
+        self.reply(banner.into_bytes())
     }
 
     fn run(&mut self, line: &str) -> HostReply {

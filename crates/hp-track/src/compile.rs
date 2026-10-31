@@ -8,7 +8,7 @@ use std::fmt;
 use regex::Regex;
 use serde_yaml::Value as Yaml;
 
-use crate::event::{EventKind, EVENT_VARS};
+use crate::event::{is_builtin, EventKind};
 use crate::expr::{self, Template, Value};
 use crate::model::{Delay, Matcher, Rule, Setter, State, Step, Track};
 use crate::schema::{fallback_steps, RawMatch, RawRule, RawState, RawStep, RawTrack};
@@ -138,7 +138,7 @@ impl Compiler {
                     vec![]
                 }
                 Ok(raw_steps) => {
-                    let known = |n: &str| vars.contains(n) || EVENT_VARS.contains(&n);
+                    let known = |n: &str| vars.contains(n) || is_builtin(n);
                     self.steps(name, &loc, raw_steps, &known, vars)
                 }
             },
@@ -148,7 +148,7 @@ impl Compiler {
 
     fn compile_rule(&mut self, state: &str, loc: &str, r: RawRule, vars: &HashSet<String>) -> Rule {
         let (matcher, captures) = self.matcher(loc, r.matcher);
-        let known = |n: &str| vars.contains(n) || captures.contains(n) || EVENT_VARS.contains(&n);
+        let known = |n: &str| vars.contains(n) || captures.contains(n) || is_builtin(n);
         let when = r.when.and_then(|w| match expr::parse(&w) {
             Err(e) => {
                 self.errs.push(format!("{loc}: `when`: {e}"));
@@ -228,22 +228,9 @@ impl Compiler {
         for RawStep(key, val) in raw {
             let mut errs = Vec::new();
             let step = match key.as_str() {
-                "send" => match val.as_str() {
-                    Some(s) => match Template::parse(s) {
-                        Ok(t) => {
-                            t.check(known, &mut errs);
-                            Some(Step::Send(t))
-                        }
-                        Err(e) => {
-                            errs.push(format!("`send`: {e}"));
-                            None
-                        }
-                    },
-                    None => {
-                        errs.push("`send` needs a string".into());
-                        None
-                    }
-                },
+                "send" => template_step("send", &val, known, &mut errs).map(Step::Send),
+                "login" => template_step("login", &val, known, &mut errs).map(Step::Login),
+                "shell" => template_step("shell", &val, known, &mut errs).map(Step::Shell),
                 "set" => self.set_step(&val, known, vars, &mut errs),
                 "delay" => match val.as_str().map(parse_delay) {
                     Some(Ok(d)) => Some(Step::Delay(d)),
@@ -288,7 +275,7 @@ impl Compiler {
                     _ => Some(Step::Close),
                 },
                 other => {
-                    errs.push(format!("unknown step `{other}` (expected send, set, delay, auth, goto, tag, close)"));
+                    errs.push(format!("unknown step `{other}` (expected send, login, shell, set, delay, auth, goto, tag, close)"));
                     None
                 }
             };
@@ -355,6 +342,29 @@ impl Compiler {
             sets.extend(setter.map(|s| (name.to_string(), s)));
         }
         Some(Step::Set(sets))
+    }
+}
+
+/// A step whose argument is a `${}` template string.
+fn template_step(
+    name: &str,
+    val: &Yaml,
+    known: &dyn Fn(&str) -> bool,
+    errs: &mut Vec<String>,
+) -> Option<Template> {
+    let Some(text) = val.as_str() else {
+        errs.push(format!("`{name}` needs a string"));
+        return None;
+    };
+    match Template::parse(text) {
+        Ok(t) => {
+            t.check(known, errs);
+            Some(t)
+        }
+        Err(e) => {
+            errs.push(format!("`{name}`: {e}"));
+            None
+        }
     }
 }
 
@@ -447,6 +457,10 @@ states:
             ("{tag: ''}", "`tag` needs"),
             ("{delay: 5}", "`delay` needs"),
             ("{set: 5}", "`set` needs a map"),
+            ("{login: 5}", "`login` needs a string"),
+            ("{shell: [a]}", "`shell` needs a string"),
+            ("{shell: '${nope}'}", "unknown variable `nope`"),
+            ("{login: 'x ${'}", "`login`: unterminated"),
             ("{set: {n: [1]}}", "unsupported value"),
             ("{set: {n: '1 +'}}", "`set n`"),
             ("{set: {n: '${1 +}'}}", "`set n`"),
@@ -466,7 +480,7 @@ states:
     #[test]
     fn accepts_every_step_kind_and_form() {
         for body in [
-            "[{send: 'x'}, {set: {n: 5}}, {set: {n: 'n * 2'}}, {set: {n: '${n}'}}, {delay: 1s}, {auth: true}, {tag: t}, {close: true}, {close: false}]",
+            "[{shell: '${command}'}, {login: '${user}'}, {send: '${host_user}@${host_cwd}'}, {send: 'x'}, {set: {n: 5}}, {set: {n: 'n * 2'}}, {set: {n: '${n}'}}, {delay: 1s}, {auth: true}, {tag: t}, {close: true}, {close: false}]",
             "{send: 'x', tag: t}",
         ] {
             let e = errs(&with_fallback(body));

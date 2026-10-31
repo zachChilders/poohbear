@@ -9,8 +9,9 @@ use anyhow::Context;
 use behavior::TrackFactory;
 use clap::Parser;
 use config::Config;
-use hp_core::{BehaviorFactory, Passive, Protocol};
+use hp_core::{BehaviorFactory, HostFactory, Passive, Protocol};
 use hp_log::LogSink;
+use hp_world::World;
 use server::{Server, Settings};
 use tokio::net::TcpListener;
 
@@ -61,7 +62,11 @@ async fn main() -> anyhow::Result<()> {
                 states = track.state_count(),
                 "track loaded"
             );
-            Arc::new(TrackFactory::new(track))
+            let host: Arc<dyn HostFactory> = match &cfg.host {
+                Some(path) => Arc::new(World::load(path)?),
+                None => Arc::new(World::default_host()),
+            };
+            Arc::new(TrackFactory::new(track, Some(host)))
         }
         None => Arc::new(Passive),
     };

@@ -858,6 +858,7 @@ dependencies = [
  "hp-proto-banner",
  "hp-proto-ssh",
  "hp-track",
+ "hp-world",
  "humantime",
  "russh",
  "serde",

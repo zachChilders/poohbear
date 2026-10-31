@@ -21,6 +21,7 @@ hp-log.workspace = true
 hp-proto-banner.workspace = true
 hp-proto-ssh.workspace = true
 hp-track.workspace = true
+hp-world.workspace = true
 humantime.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true

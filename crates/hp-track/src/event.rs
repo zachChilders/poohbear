@@ -11,6 +11,16 @@ use crate::expr::Value;
 /// Names bound from the current event; usable in any expression.
 pub(crate) const EVENT_VARS: &[&str] = &["user", "password", "command", "argv0", "op", "raw"];
 
+/// Read-only facts about the emulated host (`host_user`, `host_cwd`,
+/// `host_hostname`), when a host is configured. Each maps to `Host::var` of
+/// the name without the prefix.
+pub(crate) const HOST_VARS: &[&str] = &["host_user", "host_cwd", "host_hostname"];
+
+/// Names a track may use without declaring them under `vars`.
+pub(crate) fn is_builtin(name: &str) -> bool {
+    EVENT_VARS.contains(&name) || HOST_VARS.contains(&name)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EventKind {
     Connected,

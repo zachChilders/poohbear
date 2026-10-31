@@ -16,6 +16,8 @@ pub struct Config {
     pub listen: Vec<SocketAddr>,
     pub persona: Persona,
     pub track: Option<PathBuf>,
+    /// Host spec describing the emulated machine; the built-in one if unset.
+    pub host: Option<PathBuf>,
     /// Per-session limits handed to plugins.
     pub limits: Limits,
     /// Concurrent session cap, enforced by the server.
@@ -47,6 +49,7 @@ impl Config {
                 banner: raw.persona.banner,
             },
             track: raw.track,
+            host: raw.host,
             limits: Limits {
                 session_timeout: humantime::parse_duration(&raw.limits.session_timeout)
                     .context("limits.session_timeout")?,
@@ -69,6 +72,7 @@ struct RawConfig {
     #[serde(default)]
     persona: RawPersona,
     track: Option<PathBuf>,
+    host: Option<PathBuf>,
     #[serde(default)]
     limits: RawLimits,
     #[serde(default)]
@@ -157,13 +161,13 @@ mod tests {
         assert_eq!(c.max_sessions, 256);
         assert_eq!(c.limits.session_timeout, Duration::from_secs(900));
         assert_eq!(c.limits.max_input_bytes, 1 << 20);
-        assert!(c.track.is_none() && c.session_log.is_none());
+        assert!(c.track.is_none() && c.host.is_none() && c.session_log.is_none());
     }
 
     #[test]
     fn full_config_maps_every_field() {
         let c = Config::parse(&format!(
-            "{MIN}persona: {{ hostname: h, banner: b }}\ntrack: t.yaml\n\
+            "{MIN}persona: {{ hostname: h, banner: b }}\ntrack: t.yaml\nhost: h.yaml\n\
              limits: {{ max_sessions: 3, session_timeout: 30s, max_input_bytes: 2KiB }}\n\
              logging: {{ json: /tmp/x.jsonl }}"
         ))
@@ -173,6 +177,7 @@ mod tests {
             (Some("h"), Some("b"))
         );
         assert_eq!(c.track.as_deref(), Some(Path::new("t.yaml")));
+        assert_eq!(c.host.as_deref(), Some(Path::new("h.yaml")));
         assert_eq!(c.max_sessions, 3);
         assert_eq!(c.limits.session_timeout, Duration::from_secs(30));
         assert_eq!(c.limits.max_input_bytes, 2048);

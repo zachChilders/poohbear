@@ -58,6 +58,37 @@ fn login_sets_user_prompt_and_home() {
 }
 
 #[test]
+fn login_prints_a_banner_built_from_the_spec() {
+    let mut h = world(&default_spec()).start_with_clock(Box::new(|| NOW));
+    let r = h.login("admin");
+    assert!(
+        r.output
+            .starts_with("Welcome to Ubuntu 22.04.3 LTS (GNU/Linux 5.15.0-91-generic x86_64)\n\n"),
+        "{}",
+        r.output
+    );
+    assert!(
+        r.output
+            .ends_with("Last login: Tue Oct 28 17:13:22 2025 from 10.20.0.14\n"),
+        "{}",
+        r.output
+    );
+    assert_eq!(r.prompt, "admin@plc-gw-03:~$ ");
+    // it follows the spec, not a hard-coded string
+    let other = default_spec()
+        .replace("Ubuntu 22.04.3 LTS\"", "Debian 12\"")
+        .replace("login_from: 10.20.0.14", "login_from: 1.2.3.4");
+    let mut h = world(&other).start_with_clock(Box::new(|| NOW));
+    let r = h.login("admin");
+    assert!(
+        r.output.starts_with("Welcome to Debian 12 (GNU/Linux")
+            && r.output.contains("from 1.2.3.4"),
+        "{}",
+        r.output
+    );
+}
+
+#[test]
 fn identity_commands() {
     let mut a = admin();
     assert_eq!(out(&mut a, "whoami"), "admin\n");
@@ -933,6 +964,24 @@ fn persistence_attempts_are_flagged() {
             "cp /etc/hostname /etc/profile.d.sh; mv /etc/profile.d.sh /etc/profile"
         )
         .as_slice(),
+        ["persistence_attempt"]
+    );
+}
+
+#[test]
+fn a_failed_persistence_attempt_is_still_flagged() {
+    let mut a = admin();
+    // ~/.ssh does not exist, so the write fails...
+    let r = run(&mut a, "echo ssh-rsa AAAA >> ~/.ssh/authorized_keys");
+    assert_eq!(
+        r.output,
+        "-bash: /home/admin/.ssh/authorized_keys: No such file or directory\n"
+    );
+    // ...but the attempt is what an operator wants to know about
+    assert_eq!(r.tags, ["persistence_attempt"]);
+    // and so is one that is refused outright
+    assert_eq!(
+        tags(&mut a, "echo x > /etc/rc.local").as_slice(),
         ["persistence_attempt"]
     );
 }

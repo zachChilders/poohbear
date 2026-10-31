@@ -4,10 +4,15 @@ protocol: ssh
 listen:
   - 127.0.0.1:2222
 persona:
+  # Only used for the default prompt of tracks that have no emulated host;
+  # with a host (the default) the host spec's hostname is what is shown.
   hostname: plc-gw-03
   # SSH identification string; must start with "SSH-2.0-".
   banner: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6"
 track: tracks/ssh-linux-gateway.yaml
+# The emulated machine (users, files, processes, kernel). Omit to use the
+# built-in PLC gateway; copy crates/hp-world/hosts/default.yaml to change it.
+# host: hosts/my-host.yaml
 limits:
   max_sessions: 256
   session_timeout: 15m

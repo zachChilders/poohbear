@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use hp_core::{Action, Event};
+use hp_core::{Action, Event, Host, HostReply};
 
 use crate::event::{self, EventKind};
 use crate::expr::Value;
@@ -34,15 +34,18 @@ pub struct Session {
     state: String,
     vars: BTreeMap<String, Value>,
     rng: SplitMix64,
+    /// The emulated machine behind `login:` / `shell:`, if one is configured.
+    host: Option<Box<dyn Host>>,
 }
 
 impl Session {
-    pub fn new(track: Arc<Track>, seed: u64) -> Session {
+    pub fn new(track: Arc<Track>, seed: u64, host: Option<Box<dyn Host>>) -> Session {
         Session {
             state: track.start.clone(),
             vars: track.vars.clone(),
             track,
             rng: SplitMix64(seed),
+            host,
         }
     }
 
@@ -132,6 +135,14 @@ impl Session {
                         Err(e) => out.errors.push(format!("send: {e}")),
                     }
                 }
+                Step::Login(t) => match t.render(&|n| self.lookup(env, n)) {
+                    Ok(user) => self.with_host("login", out, |h| h.login(&user)),
+                    Err(e) => out.errors.push(format!("login: {e}")),
+                },
+                Step::Shell(t) => match t.render(&|n| self.lookup(env, n)) {
+                    Ok(line) => self.with_host("shell", out, |h| h.run(&line)),
+                    Err(e) => out.errors.push(format!("shell: {e}")),
+                },
                 Step::Set(sets) => {
                     for (name, setter) in sets {
                         let r = match setter {
@@ -165,7 +176,44 @@ impl Session {
     }
 
     fn lookup(&self, env: &HashMap<String, Value>, n: &str) -> Option<Value> {
-        env.get(n).or_else(|| self.vars.get(n)).cloned()
+        env.get(n)
+            .or_else(|| self.vars.get(n))
+            .cloned()
+            .or_else(|| self.host_var(n))
+    }
+
+    /// `host_user` -> the host's `user`, and so on.
+    fn host_var(&self, n: &str) -> Option<Value> {
+        let name = n.strip_prefix("host_")?;
+        self.host.as_ref()?.var(name).map(Value::Str)
+    }
+
+    /// Run something on the host and turn its reply into actions: the output,
+    /// the new prompt, `Close` if the shell exited, and the host's tags.
+    fn with_host(
+        &mut self,
+        step: &str,
+        out: &mut Outcome,
+        f: impl FnOnce(&mut dyn Host) -> HostReply,
+    ) {
+        let Some(host) = self.host.as_mut() else {
+            out.errors
+                .push(format!("{step}: no emulated host is configured"));
+            return;
+        };
+        let reply = f(host.as_mut());
+        if !reply.output.is_empty() {
+            out.actions.push(Action::Send(Bytes::from(reply.output)));
+        }
+        out.actions.push(Action::Prompt(reply.prompt));
+        for tag in reply.tags {
+            if !out.tags.contains(&tag) {
+                out.tags.push(tag);
+            }
+        }
+        if reply.exit {
+            out.actions.push(Action::Close);
+        }
     }
 
     fn jitter(&mut self, d: Delay) -> Duration {

@@ -7,19 +7,22 @@
 
 use std::sync::Arc;
 
-use hp_core::{Action, Behavior, BehaviorFactory, Event};
+use hp_core::{Action, Behavior, BehaviorFactory, Event, HostFactory};
 use hp_log::{Record, SessionLogger};
 use hp_track::{Session, Track};
 
-/// Starts a fresh track [`Session`] per connection.
+/// Starts a fresh track [`Session`] per connection, each with its own
+/// emulated host (so nothing one session does is visible to another).
 pub struct TrackFactory {
     track: Arc<Track>,
+    host: Option<Arc<dyn HostFactory>>,
 }
 
 impl TrackFactory {
-    pub fn new(track: Track) -> TrackFactory {
+    pub fn new(track: Track, host: Option<Arc<dyn HostFactory>>) -> TrackFactory {
         TrackFactory {
             track: Arc::new(track),
+            host,
         }
     }
 }
@@ -29,7 +32,11 @@ impl BehaviorFactory for TrackFactory {
         // Seeds only jitter delays, so they need to differ, not be secret.
         let seed = uuid::Uuid::new_v4().as_u128() as u64;
         Box::new(TrackBehavior {
-            session: Session::new(self.track.clone(), seed),
+            session: Session::new(
+                self.track.clone(),
+                seed,
+                self.host.as_ref().map(|h| h.start()),
+            ),
             log: log.clone(),
         })
     }
@@ -83,7 +90,7 @@ states:
     fn start() -> (Box<dyn Behavior>, tokio::sync::mpsc::Receiver<String>) {
         let (sink, rx) = LogSink::channel(16);
         let log = sink.session("s", "127.0.0.1:9".parse().unwrap(), "t");
-        let factory = TrackFactory::new(Track::from_yaml(TRACK).unwrap());
+        let factory = TrackFactory::new(Track::from_yaml(TRACK).unwrap(), None);
         (factory.start(&log), rx)
     }
 
@@ -138,7 +145,7 @@ states:
     fn sessions_are_independent() {
         let (sink, _rx) = LogSink::channel(16);
         let log = sink.session("s", "127.0.0.1:9".parse().unwrap(), "t");
-        let factory = TrackFactory::new(Track::from_yaml(TRACK).unwrap());
+        let factory = TrackFactory::new(Track::from_yaml(TRACK).unwrap(), None);
         let (mut one, mut two) = (factory.start(&log), factory.start(&log));
         one.react(&Event::Command("go".into()));
         assert_eq!(sent(&one.react(&Event::Command("x".into()))), "b-fallback");

