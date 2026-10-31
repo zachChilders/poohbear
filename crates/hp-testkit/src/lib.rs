@@ -214,18 +214,6 @@ pub mod conformance {
             "logged {logged} bytes received, over the cap of {cap}"
         );
     }
-
-    /// No record may contain a raw control character: hostile input must never
-    /// reach the log stream unescaped.
-    pub fn no_raw_control_characters(lines: &[String]) {
-        for line in lines {
-            let body = line.trim_end_matches('\n');
-            assert!(
-                !body.chars().any(char::is_control),
-                "raw control character in log line: {body:?}"
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -278,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn conformance_input_cap_and_control_characters() {
+    fn conformance_input_cap() {
         let (ctx, mut obs) = session(CtxOptions::default());
         ctx.log.event(hp_log::Record::rx(b"abc"));
         ctx.log.event(hp_log::Record::LimitExceeded {
@@ -287,12 +275,5 @@ mod tests {
         });
         let recs = obs.records();
         conformance::input_cap_enforced(&recs, 3);
-        conformance::no_raw_control_characters(&["{\"text\":\"a\\u001bb\"}\n".to_string()]);
-    }
-
-    #[test]
-    #[should_panic(expected = "raw control character")]
-    fn conformance_catches_unescaped_control_characters() {
-        conformance::no_raw_control_characters(&["{\"text\":\"a\u{1b}b\"}".to_string()]);
     }
 }

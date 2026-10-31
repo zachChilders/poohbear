@@ -85,40 +85,6 @@ pub trait BehaviorFactory: Send + Sync {
     fn start(&self, log: &SessionLogger) -> Box<dyn Behavior>;
 }
 
-/// What an emulated host produced for one command line.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct HostReply {
-    /// Text for the peer, with plain `\n` line endings (plugins translate).
-    pub output: String,
-    /// The prompt to show next.
-    pub prompt: String,
-    /// The session asked to end (`exit`, `logout`).
-    pub exit: bool,
-    /// Moments worth flagging for alerting (`payload_fetch`, ...), named by
-    /// the host because it knows what it just did.
-    pub tags: Vec<String>,
-}
-
-/// A simulated machine a behavior can drive: a filesystem, a shell, users.
-/// It is the shared "world" every protocol sees, so the same persona answers
-/// consistently whether reached over SSH, Telnet or anything else. One
-/// instance per session.
-///
-/// Like `Behavior`, a host never performs real I/O.
-pub trait Host: Send {
-    /// A user logged in; reset to their home directory.
-    fn login(&mut self, user: &str) -> HostReply;
-    /// Run one command line.
-    fn run(&mut self, line: &str) -> HostReply;
-    /// A read-only fact about current state: `user`, `cwd`, `hostname`.
-    fn var(&self, name: &str) -> Option<String>;
-}
-
-/// Creates the per-session [`Host`]. Shared across sessions.
-pub trait HostFactory: Send + Sync {
-    fn start(&self) -> Box<dyn Host>;
-}
-
 /// The behavior that never responds: plugins fall back to their static
 /// persona. Used when no track is configured.
 pub struct Passive;
