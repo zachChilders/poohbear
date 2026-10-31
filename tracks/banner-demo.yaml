@@ -1,0 +1,19 @@
+# Demo track for the raw `banner` plugin: a tiny line-oriented "device".
+# Each TCP read arrives as one `raw` event, so match with ^ on the first line.
+name: banner-demo
+start: prompt
+
+states:
+  prompt:
+    on:
+      - match: { raw: "(?i)^help" }
+        do: [ { send: "commands: help, status, quit\r\n" } ]
+      - match: { raw: "(?i)^status" }
+        do:
+          - delay: 200ms..600ms
+          - send: "OK uptime 41d 03:12\r\n"
+      - match: { raw: "(?i)^quit" }
+        do: [ { send: "bye\r\n" }, { close: true } ]
+      - match: { raw: "^\\S+:\\S+" }
+        do: [ { tag: credential_attempt }, { send: "login incorrect\r\n" } ]
+    fallback: { send: "?\r\n" }

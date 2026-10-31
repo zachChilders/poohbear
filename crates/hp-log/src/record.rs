@@ -29,6 +29,12 @@ pub enum Record {
     Tx(Payload),
     /// A per-session limit was hit and the session was cut short.
     LimitExceeded { limit: Limit, total: u64 },
+    /// The behavior flagged this moment for alerting (e.g. `payload_fetch`).
+    Tag { tag: String },
+    /// The behavior moved the session to another state.
+    Transition { from: String, to: String },
+    /// The behavior hit a runtime error and skipped a step.
+    BehaviorError { error: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -128,6 +134,21 @@ mod tests {
                     total: 9,
                 },
                 json!({"kind": "limit_exceeded", "limit": "max_input_bytes", "total": 9}),
+            ),
+            (
+                Record::Tag { tag: "t".into() },
+                json!({"kind": "tag", "tag": "t"}),
+            ),
+            (
+                Record::Transition {
+                    from: "a".into(),
+                    to: "b".into(),
+                },
+                json!({"kind": "transition", "from": "a", "to": "b"}),
+            ),
+            (
+                Record::BehaviorError { error: "e".into() },
+                json!({"kind": "behavior_error", "error": "e"}),
             ),
         ];
         for (record, want) in cases {
