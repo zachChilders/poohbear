@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hp-core", "crates/hp-log", "crates/hp-proto-banner", "crates/hp-bin"]
+members = ["crates/hp-core", "crates/hp-log", "crates/hp-track", "crates/hp-proto-banner", "crates/hp-bin"]
 
 [workspace.package]
 edition = "2021"
@@ -19,6 +19,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 uuid = { version = "1", features = ["v4"] }
+regex = "1"
+hp-track = { path = "crates/hp-track" }
 hp-core = { path = "crates/hp-core" }
 hp-log = { path = "crates/hp-log" }
 hp-proto-banner = { path = "crates/hp-proto-banner" }
