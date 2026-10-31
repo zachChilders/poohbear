@@ -54,6 +54,9 @@ pub enum Action {
     /// Set the text shown before each input line in an interactive session
     /// (a shell prompt). Plugins without an interactive prompt ignore it.
     Prompt(String),
+    /// Give this session a real shell (see [`ShellBackend`]) when it asks for
+    /// one. Without it, shell input is answered by the behavior as commands.
+    OpenShell,
     Close,
 }
 
@@ -83,6 +86,33 @@ pub trait Behavior: Send {
 /// Creates the per-session [`Behavior`]. Shared across sessions.
 pub trait BehaviorFactory: Send + Sync {
     fn start(&self, log: &SessionLogger) -> Box<dyn Behavior>;
+}
+
+/// The terminal a peer asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Terminal {
+    pub term: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// What a real shell is started for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellRequest {
+    pub session_id: String,
+    pub user: String,
+    /// `Some` for a one-shot command (`ssh host cmd`), `None` for a login shell.
+    pub command: Option<String>,
+    /// Present if the peer asked for a terminal.
+    pub terminal: Option<Terminal>,
+}
+
+/// Where real shells run (a sandbox per session). The honeypot only sees a
+/// byte stream: what the peer types goes in, what the shell prints comes out.
+/// Dropping the stream ends the shell.
+#[async_trait]
+pub trait ShellBackend: Send + Sync {
+    async fn start(&self, request: ShellRequest) -> anyhow::Result<Box<dyn AsyncStream>>;
 }
 
 /// The behavior that never responds: plugins fall back to their static

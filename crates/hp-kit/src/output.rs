@@ -47,8 +47,8 @@ pub struct Applied {
 /// `tty` selects terminal output processing: bare `\n` becomes `\r\n`, as a
 /// tty does. Behaviors always write plain `\n`.
 ///
-/// `AuthResult` is ignored here; it only means something while authenticating
-/// (see [`crate::Reaction::verdict`]).
+/// `AuthResult` and `OpenShell` are ignored here; they only mean something
+/// while authenticating (see [`crate::Reaction::verdict`]).
 pub async fn apply<O: Output>(
     out: &mut O,
     log: &SessionLogger,
@@ -71,7 +71,7 @@ pub async fn apply<O: Output>(
                     prompt,
                 })
             }
-            Action::AuthResult(_) => {}
+            Action::AuthResult(_) | Action::OpenShell => {}
         }
     }
     Ok(Applied {
@@ -204,9 +204,14 @@ mod tests {
     async fn auth_results_are_ignored_outside_authentication() {
         let (log, _rx) = log();
         let mut out = Collect::default();
-        apply(&mut out, &log, vec![Action::AuthResult(true)], false)
-            .await
-            .unwrap();
+        apply(
+            &mut out,
+            &log,
+            vec![Action::AuthResult(true), Action::OpenShell],
+            false,
+        )
+        .await
+        .unwrap();
         assert!(out.0.is_empty());
     }
 

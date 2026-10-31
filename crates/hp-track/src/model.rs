@@ -37,6 +37,8 @@ pub(crate) enum Step {
     Set(Vec<(String, Setter)>),
     Delay(Delay),
     Auth(bool),
+    /// Give the session a real shell when it asks for one.
+    OpenShell,
     Goto(String),
     Tag(String),
     Close,

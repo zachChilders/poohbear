@@ -16,9 +16,11 @@
 
 mod driver;
 mod output;
+mod pump;
 mod reaction;
 pub mod term;
 
 pub use driver::{Driver, InputLimit};
 pub use output::{apply, Applied, Flow, Output, StreamOut};
+pub use pump::pump;
 pub use reaction::{Reaction, Verdict};

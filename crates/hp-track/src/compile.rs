@@ -263,6 +263,14 @@ impl Compiler {
                         None
                     }
                 },
+                "open_shell" => match val.as_bool() {
+                    Some(true) => Some(Step::OpenShell),
+                    Some(false) => None,
+                    None => {
+                        errs.push("`open_shell` needs true or false".into());
+                        None
+                    }
+                },
                 "goto" => match val.as_str() {
                     Some(t) => {
                         self.edges
@@ -288,7 +296,7 @@ impl Compiler {
                     _ => Some(Step::Close),
                 },
                 other => {
-                    errs.push(format!("unknown step `{other}` (expected send, set, delay, auth, goto, tag, close)"));
+                    errs.push(format!("unknown step `{other}` (expected send, set, delay, auth, open_shell, goto, tag, close)"));
                     None
                 }
             };
@@ -443,6 +451,7 @@ states:
             ("{send: 5}", "`send` needs a string"),
             ("{send: 'x ${'}", "unterminated"),
             ("{auth: maybe}", "`auth` needs"),
+            ("{open_shell: maybe}", "`open_shell` needs"),
             ("{goto: 5}", "`goto` needs"),
             ("{tag: ''}", "`tag` needs"),
             ("{delay: 5}", "`delay` needs"),

@@ -154,6 +154,7 @@ impl Session {
                 }
                 Step::Delay(d) => out.actions.push(Action::Delay(self.jitter(*d))),
                 Step::Auth(ok) => out.actions.push(Action::AuthResult(*ok)),
+                Step::OpenShell => out.actions.push(Action::OpenShell),
                 Step::Goto(to) => {
                     out.transitions.push((self.state.clone(), to.clone()));
                     self.state = to.clone();
