@@ -11,12 +11,13 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-bytes.workspace = true
 hp-core.workspace = true
+hp-kit.workspace = true
 hp-log.workspace = true
 rand = "0.10"
 russh = { version = "0.65", default-features = false, features = ["ring", "flate2", "rsa"] }
 tokio.workspace = true
 
 [dev-dependencies]
+hp-testkit.workspace = true
 serde_json.workspace = true

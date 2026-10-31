@@ -1,16 +1,16 @@
-//! Minimal terminal line discipline for an interactive shell channel.
+//! Terminal behavior shared by every interactive protocol (SSH, Telnet, ...).
 //!
-//! A real sshd hands the shell a pty, and the *tty* does local echo and line
-//! editing. We have no pty, so this does just enough of that to feel right:
-//! echo, backspace, Ctrl-C, Ctrl-D, and swallowing escape sequences (arrow
-//! keys) so they don't end up in the command. It is a pure state machine so
-//! it can be tested without any network.
+//! A real server hands the shell a tty, and the *tty* does local echo and
+//! line editing. We have none, so [`LineEditor`] does just enough of that to
+//! feel right: echo, backspace, Ctrl-C, Ctrl-D, and swallowing escape
+//! sequences (arrow keys) so they don't end up in the command. It is a pure
+//! state machine, tested without any network.
 
 /// Longest line we keep; further bytes are dropped (a real tty also caps).
 const MAX_LINE: usize = 4096;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Edit {
+pub enum Edit {
     /// Bytes to send back to the peer as local echo.
     Echo(Vec<u8>),
     /// A completed line (without the terminator).
@@ -30,7 +30,7 @@ enum Escape {
     Csi,
 }
 
-pub(crate) struct LineEditor {
+pub struct LineEditor {
     echo: bool,
     buf: Vec<u8>,
     escape: Escape,
@@ -41,7 +41,7 @@ pub(crate) struct LineEditor {
 
 impl LineEditor {
     /// `echo` is true for pty sessions; piped (non-pty) input is not echoed.
-    pub(crate) fn new(echo: bool) -> LineEditor {
+    pub fn new(echo: bool) -> LineEditor {
         LineEditor {
             echo,
             buf: Vec::new(),
@@ -50,7 +50,7 @@ impl LineEditor {
         }
     }
 
-    pub(crate) fn feed(&mut self, data: &[u8]) -> Vec<Edit> {
+    pub fn feed(&mut self, data: &[u8]) -> Vec<Edit> {
         let mut out = Vec::new();
         for &b in data {
             let after_cr = std::mem::take(&mut self.after_cr);
@@ -136,7 +136,7 @@ impl LineEditor {
 
 /// Translate bare `\n` to `\r\n`, as a tty's output processing (ONLCR) does.
 /// Tracks output are written with plain `\n`.
-pub(crate) fn to_crlf(data: &[u8]) -> Vec<u8> {
+pub fn to_crlf(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 8);
     let mut prev = 0u8;
     for &b in data {
@@ -147,6 +147,15 @@ pub(crate) fn to_crlf(data: &[u8]) -> Vec<u8> {
         prev = b;
     }
     out
+}
+
+/// Make attacker- or config-supplied text safe to embed in a terminal prompt
+/// or banner: control characters become `?`, and the length is capped.
+pub fn sanitize(s: &str, max_chars: usize) -> String {
+    s.chars()
+        .take(max_chars)
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
 }
 
 #[cfg(test)]
@@ -257,6 +266,13 @@ mod tests {
             panic!("no line")
         };
         assert_eq!(l.len(), MAX_LINE);
+    }
+
+    #[test]
+    fn sanitize_strips_control_characters_and_caps_length() {
+        assert_eq!(sanitize("ok-host", 64), "ok-host");
+        assert_eq!(sanitize("a\x1b[31m\r\nb", 64), "a?[31m??b");
+        assert_eq!(sanitize(&"x".repeat(500), 64).len(), 64);
     }
 
     #[test]

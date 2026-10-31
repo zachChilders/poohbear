@@ -882,6 +882,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hp-kit"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "hp-core",
+ "hp-log",
+ "tokio",
+]
+
+[[package]]
 name = "hp-log"
 version = "0.1.0"
 dependencies = [
@@ -900,7 +910,8 @@ dependencies = [
  "async-trait",
  "bytes",
  "hp-core",
- "hp-log",
+ "hp-kit",
+ "hp-testkit",
  "serde_json",
  "tokio",
 ]
@@ -911,11 +922,23 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "hp-core",
+ "hp-kit",
+ "hp-log",
+ "hp-testkit",
+ "rand",
+ "russh",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "hp-testkit"
+version = "0.1.0"
+dependencies = [
  "bytes",
  "hp-core",
  "hp-log",
- "rand",
- "russh",
  "serde_json",
  "tokio",
 ]

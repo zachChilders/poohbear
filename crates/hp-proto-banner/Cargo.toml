@@ -13,8 +13,9 @@ anyhow.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 hp-core.workspace = true
-hp-log.workspace = true
+hp-kit.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+hp-testkit.workspace = true
 serde_json.workspace = true

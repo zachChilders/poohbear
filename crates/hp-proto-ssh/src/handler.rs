@@ -1,39 +1,41 @@
 //! One SSH connection: maps protocol callbacks onto `Event`s and carries out
-//! the `Action`s the session's `Behavior` returns.
+//! the replies. Everything that is not SSH (lifecycle, input cap, auth
+//! verdicts, action application, terminal handling) comes from `hp-kit`.
 //!
 //! The mapping, in short:
-//! - password auth  -> `Event::AuthAttempt`; `Action::AuthResult` decides
+//! - password auth -> `Event::AuthAttempt`; the behavior's verdict decides
 //! - shell line / exec command -> `Event::Command`
 //! - public-key offers, forwarding, subsystems -> logged and refused
 //!   (the behavior never sees them, and a key is never accepted)
 
 use std::collections::HashMap;
-use std::time::Duration;
 
-use hp_core::{Action, Behavior, Event, Secret};
-use hp_log::{AuthMethod, ChannelRequestKind, CommandSource, Limit, Record, SessionLogger};
+use hp_core::{Event, Secret};
+use hp_kit::term::{sanitize, to_crlf, Edit, LineEditor};
+use hp_kit::{apply, Driver, Flow, Output};
+use hp_log::{AuthMethod, ChannelRequestKind, CommandSource, Record};
 use russh::keys::HashAlg;
 use russh::server::{Auth, Handler, Msg, Session};
 use russh::{Channel, ChannelId, Disconnect, MethodKind, MethodSet};
 
-use crate::line::{to_crlf, Edit, LineEditor};
-
 /// Concurrent session channels per connection; real sshd defaults to 10.
 const MAX_CHANNELS: usize = 8;
 
+/// Longest hostname/username we embed in the default prompt.
+const MAX_NAME: usize = 64;
+
 pub(crate) struct Conn {
-    log: SessionLogger,
-    behavior: Box<dyn Behavior>,
-    /// Hostname shown in the prompt (already sanitized).
+    driver: Driver,
+    /// Hostname for the default prompt (already sanitized).
     host: String,
-    max_input_bytes: u64,
-    received: u64,
     /// Sent to the client as the pre-auth banner.
     auth_banner: Option<String>,
-    /// Set once password auth succeeds.
+    /// Set once password auth succeeds (sanitized: it goes into the prompt).
     user: Option<String>,
     /// Text the behavior sent with a successful auth; shown when the shell opens.
     welcome: Vec<u8>,
+    /// The behavior's prompt, if it set one; otherwise `user@host:~$ `.
+    prompt: Option<String>,
     channels: HashMap<ChannelId, Chan>,
 }
 
@@ -42,14 +44,6 @@ struct Chan {
     pty: bool,
     /// Present once a shell was started on this channel.
     shell: Option<LineEditor>,
-}
-
-/// What `decide` extracted from the behavior's reply to an auth attempt.
-struct Decision {
-    accepted: bool,
-    welcome: Vec<u8>,
-    delay: Duration,
-    close: bool,
 }
 
 /// The authentication methods we advertise.
@@ -68,90 +62,55 @@ fn reject() -> Auth {
     }
 }
 
-enum Flow {
-    Continue,
-    Close,
+/// The kit's [`Output`] over one SSH channel.
+struct ChannelOut<'a> {
+    session: &'a mut Session,
+    channel: ChannelId,
+}
+
+impl Output for ChannelOut<'_> {
+    type Error = russh::Error;
+
+    fn write(
+        &mut self,
+        data: Vec<u8>,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+        let result = self.session.data(self.channel, data);
+        async move { result }
+    }
 }
 
 impl Conn {
-    pub(crate) fn new(
-        log: SessionLogger,
-        behavior: Box<dyn Behavior>,
-        hostname: Option<&str>,
-        max_input_bytes: u64,
-        auth_banner: Option<String>,
-    ) -> Conn {
+    pub(crate) fn new(driver: Driver, hostname: Option<&str>, auth_banner: Option<String>) -> Conn {
         Conn {
-            log,
-            behavior,
-            host: sanitize(hostname.unwrap_or("localhost")),
-            max_input_bytes,
-            received: 0,
+            driver,
+            host: sanitize(hostname.unwrap_or("localhost"), MAX_NAME),
             auth_banner,
             user: None,
             welcome: Vec::new(),
+            prompt: None,
             channels: HashMap::new(),
         }
     }
 
-    /// Reduce the behavior's reply to an auth attempt to a verdict. Later
-    /// `AuthResult`s win; with none, the attempt fails.
-    fn decide(actions: Vec<Action>) -> Decision {
-        let mut d = Decision {
-            accepted: false,
-            welcome: Vec::new(),
-            delay: Duration::ZERO,
-            close: false,
-        };
-        for action in actions {
-            match action {
-                Action::AuthResult(ok) => d.accepted = ok,
-                Action::Send(b) => d.welcome.extend_from_slice(&b),
-                Action::Delay(t) => d.delay += t,
-                Action::Close => d.close = true,
+    fn prompt_text(&self) -> Vec<u8> {
+        match &self.prompt {
+            Some(p) => p.clone().into_bytes(),
+            None => {
+                let user = self.user.as_deref().unwrap_or("user");
+                format!("{user}@{}:~$ ", self.host).into_bytes()
             }
         }
-        d
-    }
-
-    fn prompt(&self) -> Vec<u8> {
-        let user = self.user.as_deref().unwrap_or("user");
-        format!("{user}@{}:~$ ", self.host).into_bytes()
     }
 
     fn send_prompt(&self, session: &mut Session, channel: ChannelId) -> Result<(), russh::Error> {
-        let prompt = self.prompt();
-        self.log.event(Record::tx(&prompt));
+        let prompt = self.prompt_text();
+        self.driver.log().event(Record::tx(&prompt));
         session.data(channel, prompt)
     }
 
     fn hangup(&self, session: &mut Session) -> Result<(), russh::Error> {
         session.disconnect(Disconnect::ByApplication, "", "")
-    }
-
-    /// Carry out a behavior's reply on `channel`. `crlf` is true for pty
-    /// sessions, where output needs tty-style line endings.
-    async fn run_actions(
-        log: &SessionLogger,
-        session: &mut Session,
-        channel: ChannelId,
-        actions: Vec<Action>,
-        crlf: bool,
-    ) -> Result<Flow, russh::Error> {
-        for action in actions {
-            match action {
-                Action::Send(data) => {
-                    let out = if crlf { to_crlf(&data) } else { data.to_vec() };
-                    log.event(Record::tx(&out));
-                    session.data(channel, out)?;
-                }
-                Action::Delay(d) => tokio::time::sleep(d).await,
-                Action::Close => return Ok(Flow::Close),
-                // Auth verdicts only mean something during authentication.
-                Action::AuthResult(_) => {}
-            }
-        }
-        Ok(Flow::Continue)
     }
 
     /// Finish a one-shot channel the way sshd does after a command exits.
@@ -160,14 +119,23 @@ impl Conn {
         session.eof(channel)?;
         session.close(channel)
     }
-}
 
-impl Drop for Conn {
-    fn drop(&mut self) {
-        // Runs on every exit path, including the server cancelling a
-        // timed-out session. Nothing can be delivered any more, so the
-        // behavior's reply is discarded.
-        self.behavior.react(&Event::Disconnected);
+    /// Run a command line through the behavior and carry out the reply.
+    /// Returns `Flow::Close` if the behavior ended the session.
+    async fn command(
+        &mut self,
+        session: &mut Session,
+        channel: ChannelId,
+        line: String,
+        tty: bool,
+    ) -> Result<Flow, russh::Error> {
+        let actions = self.driver.react(&Event::Command(line)).into_actions();
+        let mut out = ChannelOut { session, channel };
+        let applied = apply(&mut out, self.driver.log(), actions, tty).await?;
+        if applied.prompt.is_some() {
+            self.prompt = applied.prompt;
+        }
+        Ok(applied.flow)
     }
 }
 
@@ -179,7 +147,7 @@ impl Handler for Conn {
     }
 
     async fn auth_none(&mut self, user: &str) -> Result<Auth, Self::Error> {
-        self.log.event(Record::Auth {
+        self.driver.log().event(Record::Auth {
             user: user.into(),
             method: AuthMethod::None,
             credential: String::new(),
@@ -193,27 +161,27 @@ impl Handler for Conn {
             user: user.into(),
             secret: Secret::new(password),
         };
-        let d = Conn::decide(self.behavior.react(&event));
+        let verdict = self.driver.react(&event).verdict();
         // Log before any delay, so the attempt is captured even if the peer
         // gives up while waiting.
-        self.log.event(Record::Auth {
+        self.driver.log().event(Record::Auth {
             user: user.into(),
             method: AuthMethod::Password,
             credential: password.into(),
-            accepted: d.accepted && !d.close,
+            accepted: verdict.granted(),
         });
-        tokio::time::sleep(d.delay).await;
-        if d.close {
+        tokio::time::sleep(verdict.delay).await;
+        if verdict.close {
             return Err(russh::Error::Disconnect);
         }
-        if d.accepted {
-            // The name goes into the prompt, so strip terminal control bytes.
-            self.user = Some(sanitize(user));
-            self.welcome = d.welcome;
-            Ok(Auth::Accept)
-        } else {
-            Ok(reject())
+        if !verdict.granted() {
+            return Ok(reject());
         }
+        // The name goes into the prompt, so strip terminal control bytes.
+        self.user = Some(sanitize(user, MAX_NAME));
+        self.welcome = verdict.welcome;
+        self.prompt = verdict.prompt.map(|p| sanitize(&p, 256));
+        Ok(Auth::Accept)
     }
 
     /// We never accept keys; we only record which ones are offered.
@@ -222,7 +190,7 @@ impl Handler for Conn {
         user: &str,
         offer: russh::server::PublicKeyOffer<'_>,
     ) -> Result<Auth, Self::Error> {
-        self.log.event(Record::Auth {
+        self.driver.log().event(Record::Auth {
             user: user.into(),
             method: AuthMethod::PublicKey,
             credential: offer.public_key.fingerprint(HashAlg::Sha256).to_string(),
@@ -256,7 +224,7 @@ impl Handler for Conn {
         reply: russh::server::ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.log.event(Record::ChannelRequest {
+        self.driver.log().event(Record::ChannelRequest {
             request: ChannelRequestKind::PortForward,
         });
         drop(reply);
@@ -284,7 +252,7 @@ impl Handler for Conn {
         _modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.log.event(Record::ChannelRequest {
+        self.driver.log().event(Record::ChannelRequest {
             request: ChannelRequestKind::Pty,
         });
         match self.channels.get_mut(&channel) {
@@ -301,7 +269,7 @@ impl Handler for Conn {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.log.event(Record::ChannelRequest {
+        self.driver.log().event(Record::ChannelRequest {
             request: ChannelRequestKind::Shell,
         });
         let Some(chan) = self
@@ -318,7 +286,7 @@ impl Handler for Conn {
         let welcome = std::mem::take(&mut self.welcome);
         if !welcome.is_empty() {
             let out = if pty { to_crlf(&welcome) } else { welcome };
-            self.log.event(Record::tx(&out));
+            self.driver.log().event(Record::tx(&out));
             session.data(channel, out)?;
         }
         if pty {
@@ -333,7 +301,7 @@ impl Handler for Conn {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.log.event(Record::ChannelRequest {
+        self.driver.log().event(Record::ChannelRequest {
             request: ChannelRequestKind::Exec,
         });
         if !self.channels.contains_key(&channel) {
@@ -341,12 +309,11 @@ impl Handler for Conn {
         }
         session.channel_success(channel)?;
         let command = String::from_utf8_lossy(data).into_owned();
-        self.log.event(Record::Command {
+        self.driver.log().event(Record::Command {
             command: command.clone(),
             via: CommandSource::Exec,
         });
-        let actions = self.behavior.react(&Event::Command(command));
-        match Conn::run_actions(&self.log, session, channel, actions, false).await? {
+        match self.command(session, channel, command, false).await? {
             Flow::Continue => self.finish(session, channel),
             Flow::Close => self.hangup(session),
         }
@@ -358,7 +325,7 @@ impl Handler for Conn {
         _name: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.log.event(Record::ChannelRequest {
+        self.driver.log().event(Record::ChannelRequest {
             request: ChannelRequestKind::Subsystem,
         });
         session.channel_failure(channel)
@@ -394,16 +361,9 @@ impl Handler for Conn {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.received += data.len() as u64;
-        if self.received > self.max_input_bytes {
-            self.log.event(Record::LimitExceeded {
-                limit: Limit::MaxInputBytes,
-                total: self.received,
-            });
+        if self.driver.receive(data).is_err() {
             return self.hangup(session);
         }
-        self.log.event(Record::rx(data));
-
         let Some(chan) = self.channels.get_mut(&channel) else {
             return Ok(());
         };
@@ -418,14 +378,11 @@ impl Handler for Conn {
                 Edit::Echo(bytes) => session.data(channel, bytes)?,
                 Edit::Line(bytes) => {
                     let command = String::from_utf8_lossy(&bytes).into_owned();
-                    self.log.event(Record::Command {
+                    self.driver.log().event(Record::Command {
                         command: command.clone(),
                         via: CommandSource::Shell,
                     });
-                    let actions = self.behavior.react(&Event::Command(command));
-                    if let Flow::Close =
-                        Conn::run_actions(&self.log, session, channel, actions, pty).await?
-                    {
+                    if self.command(session, channel, command, pty).await? == Flow::Close {
                         return self.hangup(session);
                     }
                     if pty {
@@ -458,43 +415,5 @@ impl Handler for Conn {
             self.finish(session, channel)?;
         }
         Ok(())
-    }
-}
-
-/// Make attacker- or config-supplied text safe to embed in a terminal prompt.
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .take(64)
-        .map(|c| if c.is_control() { '?' } else { c })
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sanitize_strips_control_characters_and_caps_length() {
-        assert_eq!(sanitize("ok-host"), "ok-host");
-        assert_eq!(sanitize("a\x1b[31m\r\nb"), "a?[31m??b");
-        assert_eq!(sanitize(&"x".repeat(500)).len(), 64);
-    }
-
-    #[test]
-    fn decide_takes_the_last_verdict_and_totals_delays() {
-        use bytes::Bytes;
-        let d = Conn::decide(vec![
-            Action::Delay(Duration::from_millis(5)),
-            Action::AuthResult(false),
-            Action::Send(Bytes::from_static(b"hi ")),
-            Action::Delay(Duration::from_millis(7)),
-            Action::AuthResult(true),
-            Action::Send(Bytes::from_static(b"there")),
-        ]);
-        assert!(d.accepted && !d.close);
-        assert_eq!(d.welcome, b"hi there");
-        assert_eq!(d.delay, Duration::from_millis(12));
-        assert!(!Conn::decide(vec![]).accepted, "no verdict means rejected");
-        assert!(Conn::decide(vec![Action::Close]).close);
     }
 }

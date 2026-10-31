@@ -10,20 +10,20 @@
 //! - The shell prompt is `user@host:~$ `; the working directory is not shown.
 
 mod handler;
-mod line;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use hp_core::{Action, AsyncStream, Event, Protocol, SessionCtx};
+use hp_core::{AsyncStream, Protocol, SessionCtx};
+use hp_kit::term::to_crlf;
+use hp_kit::Driver;
 use russh::keys::{Algorithm, PrivateKey};
 use russh::server::Config;
 use russh::SshId;
 
 use handler::Conn;
-use line::to_crlf;
 
 const DEFAULT_SERVER_ID: &str = "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6";
 
@@ -81,34 +81,20 @@ impl Protocol for Ssh {
         &[22]
     }
 
-    async fn handle(
-        &self,
-        stream: Box<dyn AsyncStream>,
-        mut ctx: SessionCtx,
-    ) -> anyhow::Result<()> {
+    async fn handle(&self, stream: Box<dyn AsyncStream>, ctx: SessionCtx) -> anyhow::Result<()> {
+        let mut driver = Driver::new(ctx.log, ctx.behavior, &ctx.limits);
+
         // Before authentication there is no channel to write to, so anything
         // the behavior sends on connect becomes the pre-auth banner.
-        let mut banner = Vec::new();
-        for action in ctx.behavior.react(&Event::Connected) {
-            match action {
-                Action::Send(data) => banner.extend_from_slice(&data),
-                Action::Close => {
-                    ctx.behavior.react(&Event::Disconnected);
-                    return Ok(());
-                }
-                Action::Delay(_) | Action::AuthResult(_) => {}
-            }
+        let reply = driver.connect();
+        if reply.wants_close() {
+            return Ok(());
         }
+        let text = reply.text();
         let banner =
-            (!banner.is_empty()).then(|| String::from_utf8_lossy(&to_crlf(&banner)).into_owned());
+            (!text.is_empty()).then(|| String::from_utf8_lossy(&to_crlf(&text)).into_owned());
 
-        let conn = Conn::new(
-            ctx.log,
-            ctx.behavior,
-            ctx.persona.hostname.as_deref(),
-            ctx.limits.max_input_bytes,
-            banner,
-        );
+        let conn = Conn::new(driver, ctx.persona.hostname.as_deref(), banner);
         match russh::server::run_stream(self.config.clone(), stream, conn).await {
             Ok(session) => session.await.or_else(routine),
             Err(e) => routine(e),

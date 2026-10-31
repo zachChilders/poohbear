@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hp-core", "crates/hp-log", "crates/hp-track", "crates/hp-proto-banner", "crates/hp-proto-ssh", "crates/hp-bin"]
+members = ["crates/hp-core", "crates/hp-log", "crates/hp-track", "crates/hp-kit", "crates/hp-testkit", "crates/hp-proto-banner", "crates/hp-proto-ssh", "crates/hp-bin"]
 
 [workspace.package]
 edition = "2021"
@@ -31,5 +31,7 @@ regex = "1"
 hp-track = { path = "crates/hp-track" }
 hp-core = { path = "crates/hp-core" }
 hp-log = { path = "crates/hp-log" }
+hp-kit = { path = "crates/hp-kit" }
+hp-testkit = { path = "crates/hp-testkit" }
 hp-proto-banner = { path = "crates/hp-proto-banner" }
 hp-proto-ssh = { path = "crates/hp-proto-ssh" }

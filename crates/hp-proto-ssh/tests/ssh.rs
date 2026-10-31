@@ -4,43 +4,18 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bytes::Bytes;
-use hp_core::{Action, Behavior, Event, Limits, Persona, Protocol, SessionCtx};
-use hp_log::LogSink;
+use hp_core::{Action, Event, Protocol};
 use hp_proto_ssh::Ssh;
+use hp_testkit::{conformance, of_kind, send, session, CtxOptions, Observer, Script};
 use russh::client;
 use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg};
 use russh::{Channel, ChannelMsg};
 use serde_json::Value;
-use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinHandle;
 
 const WAIT: Duration = Duration::from_secs(10);
 
 // ------------------------------------------------------------ behaviors
-
-type Script = fn(&Event) -> Vec<Action>;
-
-struct Scripted {
-    seen: Arc<Mutex<Vec<String>>>,
-    script: Script,
-}
-
-impl Behavior for Scripted {
-    fn react(&mut self, event: &Event) -> Vec<Action> {
-        let label = match event {
-            Event::AuthAttempt { user, .. } => format!("auth:{user}"),
-            Event::Command(c) => format!("cmd:{c}"),
-            other => format!("{other:?}"),
-        };
-        self.seen.lock().unwrap().push(label);
-        (self.script)(event)
-    }
-}
-
-fn send(s: &'static str) -> Action {
-    Action::Send(Bytes::from_static(s.as_bytes()))
-}
 
 /// Accepts the password `letmein` (with a welcome message); answers a few commands.
 fn script(event: &Event) -> Vec<Action> {
@@ -86,8 +61,7 @@ impl client::Handler for Client {
 
 struct Harness {
     client: client::Handle<Client>,
-    records: Receiver<String>,
-    seen: Arc<Mutex<Vec<String>>>,
+    obs: Observer,
     banner: Arc<Mutex<String>>,
     server: JoinHandle<anyhow::Result<()>>,
 }
@@ -113,26 +87,12 @@ async fn start(opts: Opts) -> Harness {
 }
 
 async fn try_start(opts: Opts) -> Result<Harness, russh::Error> {
-    let (sink, records) = LogSink::channel(1024);
-    let peer = "127.0.0.1:2222".parse().unwrap();
-    let seen = Arc::new(Mutex::new(vec![]));
-    let ctx = SessionCtx {
-        session_id: "s".into(),
-        peer,
-        log: sink.session("s", peer, "ssh"),
-        persona: Persona {
-            hostname: opts.hostname.map(String::from),
-            banner: None,
-        },
-        limits: Limits {
-            session_timeout: Duration::from_secs(60),
-            max_input_bytes: opts.max_input_bytes,
-        },
-        behavior: Box::new(Scripted {
-            seen: seen.clone(),
-            script: opts.script,
-        }),
-    };
+    let (ctx, obs) = session(CtxOptions {
+        script: opts.script,
+        hostname: opts.hostname,
+        max_input_bytes: opts.max_input_bytes,
+        ..CtxOptions::default()
+    });
     let (server_io, client_io) = tokio::io::duplex(1 << 16);
     let ssh = Ssh::new(Some("SSH-2.0-OpenSSH_8.9p1 Test")).unwrap();
     let server = tokio::spawn(async move { ssh.handle(Box::new(server_io), ctx).await });
@@ -145,8 +105,7 @@ async fn try_start(opts: Opts) -> Result<Harness, russh::Error> {
         client::connect_stream(Arc::new(client::Config::default()), client_io, handler).await?;
     Ok(Harness {
         client,
-        records,
-        seen,
+        obs,
         banner,
         server,
     })
@@ -173,17 +132,13 @@ impl Harness {
             .expect("server stops")
             .unwrap();
         assert!(result.is_ok(), "{result:?}");
-        let mut records = vec![];
-        while let Ok(line) = self.records.try_recv() {
-            records.push(serde_json::from_str(&line).unwrap());
-        }
-        let seen = self.seen.lock().unwrap().clone();
+        let records = self.obs.records();
+        // Every protocol must satisfy the shared rules; check them on each session.
+        conformance::envelope(&records);
+        conformance::lifecycle(&self.obs.seen);
+        let seen = self.obs.seen.all();
         (records, seen)
     }
-}
-
-fn of_kind<'a>(records: &'a [Value], kind: &str) -> Vec<&'a Value> {
-    records.iter().filter(|r| r["kind"] == kind).collect()
 }
 
 /// Read channel data until `needle` has been seen; returns everything read.
@@ -496,13 +451,8 @@ async fn oversized_input_is_cut_off_and_logged() {
         .expect("server cuts the session")
         .unwrap()
         .unwrap();
-    let mut records = vec![];
-    while let Ok(line) = h.records.try_recv() {
-        records.push(serde_json::from_str::<Value>(&line).unwrap());
-    }
-    let hit = of_kind(&records, "limit_exceeded");
-    assert_eq!(hit.len(), 1, "{records:?}");
-    assert_eq!(hit[0]["limit"], "max_input_bytes");
+    let records = h.obs.records();
+    conformance::input_cap_enforced(&records, 32);
     assert!(
         of_kind(&records, "rx").is_empty(),
         "over-limit input is not logged as rx"
