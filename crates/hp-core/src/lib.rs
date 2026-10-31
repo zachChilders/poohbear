@@ -19,11 +19,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStream for T {}
 #[derive(Clone)]
 pub struct Secret(String);
 impl Secret {
-    pub fn new(s: impl Into<String>) -> Self { Self(s.into()) }
-    pub fn expose(&self) -> &str { &self.0 }
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
 }
 impl std::fmt::Debug for Secret {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("Secret(***)") }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(***)")
+    }
 }
 
 /// plugin -> engine
@@ -73,4 +79,21 @@ pub trait Protocol: Send + Sync {
     fn name(&self) -> &'static str;
     fn default_ports(&self) -> &[u16];
     async fn handle(&self, stream: Box<dyn AsyncStream>, ctx: SessionCtx) -> anyhow::Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_is_redacted_everywhere_except_expose() {
+        let s = Secret::new("hunter2");
+        assert_eq!(format!("{s:?}"), "Secret(***)");
+        let ev = Event::AuthAttempt {
+            user: "root".into(),
+            secret: s.clone(),
+        };
+        assert!(!format!("{ev:?}").contains("hunter2"));
+        assert_eq!(s.expose(), "hunter2");
+    }
 }

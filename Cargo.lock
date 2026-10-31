@@ -222,6 +222,7 @@ name = "hp-bin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "futures-util",
  "hp-core",
@@ -234,6 +235,7 @@ dependencies = [
  "serde_yaml",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -245,7 +247,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "hp-log",
- "serde",
  "serde_json",
  "tokio",
 ]
@@ -255,10 +256,10 @@ name = "hp-log"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -268,6 +269,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "hp-core",
+ "hp-log",
  "serde_json",
  "tokio",
 ]
