@@ -8,6 +8,8 @@ mod record;
 mod session;
 mod sink;
 
-pub use record::{Limit, Payload, Record, RejectReason};
+pub use record::{
+    AuthMethod, ChannelRequestKind, CommandSource, Limit, Payload, Record, RejectReason,
+};
 pub use session::SessionLogger;
 pub use sink::LogSink;

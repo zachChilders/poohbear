@@ -1,5 +1,11 @@
-# Example track (from the build plan). `fs_add` and the fake filesystem arrive
-# with the SSH plugin in Phase 2; here wget/curl only flags + fakes output.
+# Example track for the `ssh` plugin. The plugin handles the protocol, the
+# terminal and the prompt; this file decides who gets in and what commands say.
+# - auth_attempt: reply with `auth: true|false`; `send` text sent alongside a
+#   successful `auth` is shown as the welcome message when the shell opens.
+# - command: one event per shell line or exec request. Use plain "\n"; the
+#   plugin converts to tty line endings.
+# `fs_add` and the fake filesystem (ls, cat) are not implemented yet; wget/curl
+# only flag + fake their output.
 name: ssh-linux-gateway
 vars:
   failed_logins: 0
@@ -20,6 +26,7 @@ states:
           - tag: auth_success
           - delay: 400ms
           - auth: true
+          - send: "Welcome to Ubuntu 22.04.3 LTS (GNU/Linux 5.15.0-91-generic x86_64)\n\nLast login: Tue Oct 28 09:14:02 2025 from 10.20.0.14\n"
           - goto: shell
     fallback:
       close: true

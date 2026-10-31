@@ -22,11 +22,16 @@ struct Cli {
     config: PathBuf,
 }
 
-/// Plugin registry: protocol name -> implementation.
-fn plugin(name: &str) -> Option<Arc<dyn Protocol>> {
-    match name {
-        "banner" => Some(Arc::new(hp_proto_banner::Banner)),
-        _ => None,
+/// Plugin registry: protocol name -> implementation. Plugins that need
+/// persona-derived setup (e.g. the SSH identification string) validate it
+/// here, so a bad config fails at startup.
+fn plugin(cfg: &Config) -> anyhow::Result<Arc<dyn Protocol>> {
+    match cfg.protocol.as_str() {
+        "banner" => Ok(Arc::new(hp_proto_banner::Banner)),
+        "ssh" => Ok(Arc::new(hp_proto_ssh::Ssh::new(
+            cfg.persona.banner.as_deref(),
+        )?)),
+        other => anyhow::bail!("unknown protocol {other:?} (available: banner, ssh)"),
     }
 }
 
@@ -45,9 +50,7 @@ fn init_tracing() {
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     let cfg = Config::load(&Cli::parse().config)?;
-    let proto = plugin(&cfg.protocol).ok_or_else(|| {
-        anyhow::anyhow!("unknown protocol {:?} (available: banner)", cfg.protocol)
-    })?;
+    let proto = plugin(&cfg)?;
 
     // Fail closed: an invalid track means the honeypot does not start.
     let behavior: Arc<dyn BehaviorFactory> = match &cfg.track {

