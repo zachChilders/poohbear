@@ -1,6 +1,7 @@
 # Design: a real-shell (container) backend
 
-**Status:** proposal, for a decision. No code yet.
+**Status:** accepted: shells are served by real containers only; the emulator
+(`hp-world`, left on the `phase-2-ssh` branch) is retired. No code yet.
 
 ## Why
 
@@ -71,12 +72,12 @@ stream on a pty, so it is a second path, not a replacement:
 - `hp-kit`: a `bridge()` that pumps bytes between the protocol channel and the
   `ShellStream`, enforcing the input cap and logging every byte as `rx`/`tx`
   through the existing `Driver`. SSH and (later) Telnet share it.
-- Both backends sit behind the same seam. The emulator keeps working and is
-  the default.
+- The backend sits behind a trait, so tests use an in-memory fake and a
+  different runtime (gVisor, Firecracker) is a new implementation, not a
+  redesign.
 
-The host spec (`hosts/*.yaml`) can drive both: it already describes users,
-files and processes, so it can also *render the container image*, keeping the
-persona consistent between backends.
+The persona (users, files, hostname) is baked into the container image, so it
+is defined once and is consistent across sessions.
 
 ## Where alerts come from
 
@@ -93,14 +94,13 @@ alerts need other sources:
 | `persistence_attempt` | writes to known paths seen in the layer diff |
 | `credential_access` | needs file-access auditing; deferred |
 
-Expect somewhat lower semantic fidelity than the emulator until this is built.
+Alerts will be less semantic than an emulator's until this is built.
 
 ## Proposed configuration
 
 ```yaml
 protocol: ssh
 shell:
-  backend: container        # or: emulator (default)
   runtime: runsc            # runsc | firecracker
   image: honeypot/ubuntu-gateway:2025-10
   network: none             # none | capture
@@ -111,7 +111,7 @@ broker: /run/honeypot-broker.sock
 
 ## Milestones (each its own reviewable PR)
 
-1. **Contract + bridge, no containers.** `ShellBackend`, `Action::OpenShell`,
+1. **Contract + bridge, no containers.** (in progress) `ShellBackend`, `Action::OpenShell`,
    `hp-kit::bridge`, SSH passthrough, tested in CI with an in-memory fake
    backend.
 2. **Broker + container backend** with `runsc` locally, image build, and
@@ -123,8 +123,8 @@ broker: /run/honeypot-broker.sock
 ## Risks and open questions
 
 - Needs a Linux host with `runsc` or KVM; not runnable on a Mac without a VM.
-- Per-session memory times `max_sandboxes` forces a much lower concurrency than
-  the emulator's 256.
+- Per-session memory times `max_sandboxes` means a much lower concurrency than
+  the 256 sessions of a scripted shell.
 - gVisor's `4.4.0` against Firecracker's KVM requirement: decided by where this
   will be deployed.
 - Legal and abuse exposure of letting attackers run code on your infrastructure
@@ -133,9 +133,9 @@ broker: /run/honeypot-broker.sock
 - Multiple protocols on one persona (SSH and HTTP showing one box) would need a
   shared sandbox per source for a time window. Out of scope here.
 
-## Decision requested
+## Decision
 
-1. **Hybrid (recommended):** keep the emulator as default, build the container
-   backend as an opt-in mode, starting with milestone 1.
-2. **Containers only:** drop the emulator, same milestones.
-3. **Emulator only:** this design is shelved.
+**Containers only.** The emulator is retired rather than kept as a fallback:
+one implementation to harden and review. Sessions that should not get a real
+shell (the track decides) get no shell, or the scripted replies a track can
+already give.
