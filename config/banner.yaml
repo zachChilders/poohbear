@@ -8,5 +8,6 @@ limits:
   max_sessions: 256
   session_timeout: 15m
   max_input_bytes: 1MiB
+track: tracks/banner-demo.yaml
 logging:
   json: ./sessions.jsonl

@@ -1,3 +1,4 @@
+mod behavior;
 mod config;
 mod server;
 
@@ -5,11 +6,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
+use behavior::TrackFactory;
 use clap::Parser;
 use config::Config;
-use hp_core::Protocol;
+use hp_core::{BehaviorFactory, Passive, Protocol};
 use hp_log::LogSink;
-use server::Server;
+use server::{Server, Settings};
 use tokio::net::TcpListener;
 
 #[derive(Parser)]
@@ -48,17 +50,26 @@ async fn main() -> anyhow::Result<()> {
     })?;
 
     // Fail closed: an invalid track means the honeypot does not start.
-    if let Some(path) = &cfg.track {
-        let track = hp_track::Track::load(path)?;
-        tracing::info!(
-            track = track.name(),
-            states = track.state_count(),
-            "track loaded"
-        );
-    }
+    let behavior: Arc<dyn BehaviorFactory> = match &cfg.track {
+        Some(path) => {
+            let track = hp_track::Track::load(path)?;
+            tracing::info!(
+                track = track.name(),
+                states = track.state_count(),
+                "track loaded"
+            );
+            Arc::new(TrackFactory::new(track))
+        }
+        None => Arc::new(Passive),
+    };
 
     let sink = LogSink::open(cfg.session_log.as_deref()).await?;
-    let server = Server::new(proto, sink, cfg.limits, cfg.persona, cfg.max_sessions);
+    let settings = Settings {
+        limits: cfg.limits,
+        persona: cfg.persona,
+        max_sessions: cfg.max_sessions,
+    };
+    let server = Server::new(proto, behavior, sink, settings);
 
     for addr in &cfg.listen {
         let listener = TcpListener::bind(addr)

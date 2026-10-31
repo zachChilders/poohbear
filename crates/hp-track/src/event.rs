@@ -22,6 +22,13 @@ pub(crate) enum EventKind {
 }
 
 impl EventKind {
+    /// Input is what the peer sends. Connect/disconnect are lifecycle
+    /// notifications: a track may react to them explicitly, but a state's
+    /// `fallback` (the "unexpected input" reply) never answers them.
+    pub(crate) fn is_input(self) -> bool {
+        !matches!(self, Self::Connected | Self::Disconnected)
+    }
+
     pub(crate) fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "connected" => Self::Connected,

@@ -7,13 +7,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::FutureExt;
-use hp_core::{AsyncStream, Limits, Persona, Protocol, SessionCtx};
+use hp_core::{AsyncStream, BehaviorFactory, Limits, Persona, Protocol, SessionCtx};
 use hp_log::{LogSink, Record, RejectReason};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
+/// Tunables for a [`Server`].
+pub struct Settings {
+    pub limits: Limits,
+    pub persona: Persona,
+    /// Concurrent session cap.
+    pub max_sessions: usize,
+}
+
 pub struct Server {
     proto: Arc<dyn Protocol>,
+    behavior: Arc<dyn BehaviorFactory>,
     sink: LogSink,
     limits: Limits,
     persona: Persona,
@@ -23,17 +32,17 @@ pub struct Server {
 impl Server {
     pub fn new(
         proto: Arc<dyn Protocol>,
+        behavior: Arc<dyn BehaviorFactory>,
         sink: LogSink,
-        limits: Limits,
-        persona: Persona,
-        max_sessions: usize,
+        settings: Settings,
     ) -> Arc<Server> {
         Arc::new(Server {
             proto,
+            behavior,
             sink,
-            limits,
-            persona,
-            permits: Arc::new(Semaphore::new(max_sessions)),
+            limits: settings.limits,
+            persona: settings.persona,
+            permits: Arc::new(Semaphore::new(settings.max_sessions)),
         })
     }
 
@@ -71,6 +80,7 @@ impl Server {
             log: log.clone(),
             persona: self.persona.clone(),
             limits: self.limits.clone(),
+            behavior: self.behavior.start(&log),
         };
         tokio::spawn(async move {
             let _permit = permit;
@@ -92,7 +102,9 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::behavior::TrackFactory;
     use async_trait::async_trait;
+    use hp_core::Passive;
     use serde_json::Value;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -141,18 +153,35 @@ mod tests {
         max_sessions: usize,
         timeout: Duration,
     ) -> (SocketAddr, Receiver<String>) {
+        let persona = Persona::default();
+        serve(
+            Arc::new(Test(mode)),
+            Arc::new(Passive),
+            persona,
+            max_sessions,
+            timeout,
+        )
+        .await
+    }
+
+    async fn serve(
+        proto: Arc<dyn Protocol>,
+        behavior: Arc<dyn BehaviorFactory>,
+        persona: Persona,
+        max_sessions: usize,
+        timeout: Duration,
+    ) -> (SocketAddr, Receiver<String>) {
         let (sink, rx) = LogSink::channel(64);
         let limits = Limits {
             session_timeout: timeout,
             max_input_bytes: 1024,
         };
-        let server = Server::new(
-            Arc::new(Test(mode)),
-            sink,
+        let settings = Settings {
             limits,
-            Persona::default(),
+            persona,
             max_sessions,
-        );
+        };
+        let server = Server::new(proto, behavior, sink, settings);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(server.serve(listener));
@@ -232,6 +261,60 @@ mod tests {
             c.read(&mut [0u8; 1]).await.unwrap(),
             0,
             "connection closed after timeout"
+        );
+    }
+
+    /// The whole stack: real plugin, real track, real socket.
+    #[tokio::test]
+    async fn banner_plugin_is_driven_by_a_track_end_to_end() {
+        let track = hp_track::Track::from_yaml(
+            r#"
+name: demo
+start: s
+states:
+  s:
+    on:
+      - match: { raw: '^status' }
+        do: [ { tag: queried }, { send: "OK\r\n" } ]
+      - match: { raw: '^quit' }
+        do: [ { send: "bye\r\n" }, { close: true } ]
+    fallback: { send: "?\r\n" }
+"#,
+        )
+        .unwrap();
+        let persona = Persona {
+            hostname: None,
+            banner: Some("READY".into()),
+        };
+        let (addr, mut rx) = serve(
+            Arc::new(hp_proto_banner::Banner),
+            Arc::new(TrackFactory::new(track)),
+            persona,
+            4,
+            LONG,
+        )
+        .await;
+
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        let mut expect = async |send: &[u8], reply: &[u8]| {
+            c.write_all(send).await.unwrap();
+            let mut got = vec![0u8; reply.len()];
+            c.read_exact(&mut got).await.unwrap();
+            assert_eq!(got, reply);
+        };
+        expect(b"", b"READY\r\n").await;
+        expect(b"status\n", b"OK\r\n").await;
+        expect(b"quit\n", b"bye\r\n").await;
+        assert_eq!(
+            c.read(&mut [0u8; 1]).await.unwrap(),
+            0,
+            "track closed the connection"
+        );
+
+        let kinds = kinds_until(&mut rx, "disconnect").await;
+        assert_eq!(
+            kinds,
+            ["connect", "tx", "rx", "tag", "tx", "rx", "tx", "disconnect"]
         );
     }
 

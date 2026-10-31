@@ -1,6 +1,8 @@
 //! Core types shared by every protocol plugin.
 //!
-//! Plugins own the wire format; the (future) track engine owns behavior.
+//! Plugins own the wire format; a [`Behavior`] owns what to say back. The two
+//! meet only through [`Event`] and [`Action`], so a plugin depends on this
+//! crate alone, never on a particular behavior engine.
 //! Plugins never get an API for spawning processes or opening outbound sockets.
 
 use std::net::SocketAddr;
@@ -66,12 +68,43 @@ pub struct Persona {
     pub banner: Option<String>,
 }
 
+/// Decides how the honeypot responds. One instance per session; plugins feed
+/// it protocol events and carry out the actions it returns, in order.
+///
+/// Implementations must be deterministic given the event sequence and must
+/// never perform I/O: everything an attacker sees comes back as [`Action`]s.
+pub trait Behavior: Send {
+    fn react(&mut self, event: &Event) -> Vec<Action>;
+}
+
+/// Creates the per-session [`Behavior`]. Shared across sessions.
+pub trait BehaviorFactory: Send + Sync {
+    fn start(&self, log: &SessionLogger) -> Box<dyn Behavior>;
+}
+
+/// The behavior that never responds: plugins fall back to their static
+/// persona. Used when no track is configured.
+pub struct Passive;
+
+impl Behavior for Passive {
+    fn react(&mut self, _event: &Event) -> Vec<Action> {
+        Vec::new()
+    }
+}
+
+impl BehaviorFactory for Passive {
+    fn start(&self, _log: &SessionLogger) -> Box<dyn Behavior> {
+        Box::new(Passive)
+    }
+}
+
 pub struct SessionCtx {
     pub session_id: String,
     pub peer: SocketAddr,
     pub log: SessionLogger,
     pub persona: Persona,
     pub limits: Limits,
+    pub behavior: Box<dyn Behavior>,
 }
 
 #[async_trait]
@@ -95,5 +128,16 @@ mod tests {
         };
         assert!(!format!("{ev:?}").contains("hunter2"));
         assert_eq!(s.expose(), "hunter2");
+    }
+
+    #[test]
+    fn passive_never_responds() {
+        let mut b = Passive.start(&hp_log::LogSink::channel(1).0.session(
+            "s",
+            "127.0.0.1:1".parse().unwrap(),
+            "t",
+        ));
+        assert!(b.react(&Event::Connected).is_empty());
+        assert!(b.react(&Event::Command("ls".into())).is_empty());
     }
 }
