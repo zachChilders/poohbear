@@ -35,10 +35,27 @@ impl fmt::Display for Value {
 pub type Env<'a> = &'a dyn Fn(&str) -> Option<Value>;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BinOp { Add, Sub, Mul, Div, Rem, Eq, Ne, Lt, Le, Gt, Ge, And, Or }
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum UnOp { Not, Neg }
+pub enum UnOp {
+    Not,
+    Neg,
+}
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -72,12 +89,19 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             i += 1;
         } else if c.is_ascii_digit() {
             let s = i;
-            while i < cs.len() && cs[i].is_ascii_digit() { i += 1; }
+            while i < cs.len() && cs[i].is_ascii_digit() {
+                i += 1;
+            }
             let t: String = cs[s..i].iter().collect();
-            out.push(Tok::Int(t.parse().map_err(|_| format!("integer literal {t} is too large"))?));
+            out.push(Tok::Int(
+                t.parse()
+                    .map_err(|_| format!("integer literal {t} is too large"))?,
+            ));
         } else if c.is_ascii_alphabetic() || c == '_' {
             let s = i;
-            while i < cs.len() && (cs[i].is_ascii_alphanumeric() || cs[i] == '_') { i += 1; }
+            while i < cs.len() && (cs[i].is_ascii_alphanumeric() || cs[i] == '_') {
+                i += 1;
+            }
             out.push(Tok::Ident(cs[s..i].iter().collect()));
         } else if c == '\'' || c == '"' {
             i += 1;
@@ -85,11 +109,18 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             loop {
                 let d = *cs.get(i).ok_or("unterminated string literal")?;
                 i += 1;
-                if d == c { break; }
+                if d == c {
+                    break;
+                }
                 if d == '\\' {
                     let e = *cs.get(i).ok_or("unterminated string literal")?;
                     i += 1;
-                    s.push(match e { 'n' => '\n', 't' => '\t', 'r' => '\r', o => o });
+                    s.push(match e {
+                        'n' => '\n',
+                        't' => '\t',
+                        'r' => '\r',
+                        o => o,
+                    });
                 } else {
                     s.push(d);
                 }
@@ -97,16 +128,26 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             out.push(Tok::Str(s));
         } else {
             let two: String = cs[i..(i + 2).min(cs.len())].iter().collect();
-            if let Some(o) = ["==", "!=", "<=", ">=", "&&", "||"].into_iter().find(|o| *o == two) {
+            if let Some(o) = ["==", "!=", "<=", ">=", "&&", "||"]
+                .into_iter()
+                .find(|o| *o == two)
+            {
                 out.push(Tok::Op(o));
                 i += 2;
                 continue;
             }
             out.push(match c {
-                '+' => Tok::Op("+"), '-' => Tok::Op("-"), '*' => Tok::Op("*"),
-                '/' => Tok::Op("/"), '%' => Tok::Op("%"), '<' => Tok::Op("<"),
-                '>' => Tok::Op(">"), '!' => Tok::Op("!"),
-                '(' => Tok::LParen, ')' => Tok::RParen, ',' => Tok::Comma,
+                '+' => Tok::Op("+"),
+                '-' => Tok::Op("-"),
+                '*' => Tok::Op("*"),
+                '/' => Tok::Op("/"),
+                '%' => Tok::Op("%"),
+                '<' => Tok::Op("<"),
+                '>' => Tok::Op(">"),
+                '!' => Tok::Op("!"),
+                '(' => Tok::LParen,
+                ')' => Tok::RParen,
+                ',' => Tok::Comma,
                 other => return Err(format!("unexpected character {other:?}")),
             });
             i += 1;
@@ -121,31 +162,44 @@ fn binop(o: &str) -> Option<(BinOp, u8)> {
     Some(match o {
         "||" => (BinOp::Or, 1),
         "&&" => (BinOp::And, 2),
-        "==" => (BinOp::Eq, 3), "!=" => (BinOp::Ne, 3),
-        "<" => (BinOp::Lt, 4), "<=" => (BinOp::Le, 4), ">" => (BinOp::Gt, 4), ">=" => (BinOp::Ge, 4),
-        "+" => (BinOp::Add, 5), "-" => (BinOp::Sub, 5),
-        "*" => (BinOp::Mul, 6), "/" => (BinOp::Div, 6), "%" => (BinOp::Rem, 6),
+        "==" => (BinOp::Eq, 3),
+        "!=" => (BinOp::Ne, 3),
+        "<" => (BinOp::Lt, 4),
+        "<=" => (BinOp::Le, 4),
+        ">" => (BinOp::Gt, 4),
+        ">=" => (BinOp::Ge, 4),
+        "+" => (BinOp::Add, 5),
+        "-" => (BinOp::Sub, 5),
+        "*" => (BinOp::Mul, 6),
+        "/" => (BinOp::Div, 6),
+        "%" => (BinOp::Rem, 6),
         _ => return None,
     })
 }
 
-struct Parser { t: Vec<Tok>, i: usize }
+struct Parser {
+    t: Vec<Tok>,
+    i: usize,
+}
 
 /// Maximum nesting depth, so hostile-ish track files can't overflow the stack.
 const MAX_DEPTH: usize = 64;
 
 impl Parser {
-    fn peek(&self) -> Option<&Tok> { self.t.get(self.i) }
+    fn peek(&self) -> Option<&Tok> {
+        self.t.get(self.i)
+    }
 
     fn expr(&mut self, min: u8, depth: usize) -> Result<Expr, String> {
-        if depth > MAX_DEPTH { return Err("expression nested too deeply".into()); }
+        if depth > MAX_DEPTH {
+            return Err("expression nested too deeply".into());
+        }
         let mut lhs = self.unary(depth)?;
-        loop {
-            let (op, prec) = match self.peek() {
-                Some(Tok::Op(o)) => match binop(o) { Some(x) => x, None => break },
-                _ => break,
-            };
-            if prec < min { break; }
+        while let Some(&Tok::Op(o)) = self.peek() {
+            let Some((op, prec)) = binop(o) else { break };
+            if prec < min {
+                break;
+            }
             self.i += 1;
             let rhs = self.expr(prec + 1, depth + 1)?;
             lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs));
@@ -154,7 +208,9 @@ impl Parser {
     }
 
     fn unary(&mut self, depth: usize) -> Result<Expr, String> {
-        if depth > MAX_DEPTH { return Err("expression nested too deeply".into()); }
+        if depth > MAX_DEPTH {
+            return Err("expression nested too deeply".into());
+        }
         let op = match self.peek() {
             Some(Tok::Op("!")) => Some(UnOp::Not),
             Some(Tok::Op("-")) => Some(UnOp::Neg),
@@ -176,14 +232,23 @@ impl Parser {
             Some(Tok::LParen) => {
                 let e = self.expr(0, depth + 1)?;
                 match self.t.get(self.i) {
-                    Some(Tok::RParen) => { self.i += 1; Ok(e) }
+                    Some(Tok::RParen) => {
+                        self.i += 1;
+                        Ok(e)
+                    }
                     _ => Err("expected `)`".into()),
                 }
             }
             Some(Tok::Ident(name)) => {
-                if name == "true" { return Ok(Expr::Lit(Value::Bool(true))); }
-                if name == "false" { return Ok(Expr::Lit(Value::Bool(false))); }
-                if !matches!(self.peek(), Some(Tok::LParen)) { return Ok(Expr::Var(name)); }
+                if name == "true" {
+                    return Ok(Expr::Lit(Value::Bool(true)));
+                }
+                if name == "false" {
+                    return Ok(Expr::Lit(Value::Bool(false)));
+                }
+                if !matches!(self.peek(), Some(Tok::LParen)) {
+                    return Ok(Expr::Var(name));
+                }
                 self.i += 1;
                 let mut args = Vec::new();
                 if matches!(self.peek(), Some(Tok::RParen)) {
@@ -194,7 +259,10 @@ impl Parser {
                     args.push(self.expr(0, depth + 1)?);
                     match self.t.get(self.i) {
                         Some(Tok::Comma) => self.i += 1,
-                        Some(Tok::RParen) => { self.i += 1; break; }
+                        Some(Tok::RParen) => {
+                            self.i += 1;
+                            break;
+                        }
                         _ => return Err(format!("expected `,` or `)` in call to {name}")),
                     }
                 }
@@ -209,7 +277,9 @@ impl Parser {
 pub fn parse(src: &str) -> Result<Expr, String> {
     let mut p = Parser { t: lex(src)?, i: 0 };
     let e = p.expr(0, 0)?;
-    if p.i < p.t.len() { return Err(format!("unexpected trailing token {:?}", p.t[p.i])); }
+    if p.i < p.t.len() {
+        return Err(format!("unexpected trailing token {:?}", p.t[p.i]));
+    }
     Ok(e)
 }
 
@@ -228,17 +298,28 @@ impl Expr {
     pub fn check(&self, known: &dyn Fn(&str) -> bool, errs: &mut Vec<String>) {
         match self {
             Expr::Lit(_) => {}
-            Expr::Var(v) => if !known(v) { errs.push(format!("unknown variable `{v}`")); },
+            Expr::Var(v) => {
+                if !known(v) {
+                    errs.push(format!("unknown variable `{v}`"));
+                }
+            }
             Expr::Unary(_, e) => e.check(known, errs),
-            Expr::Bin(_, a, b) => { a.check(known, errs); b.check(known, errs); }
+            Expr::Bin(_, a, b) => {
+                a.check(known, errs);
+                b.check(known, errs);
+            }
             Expr::Call(name, args) => {
                 match arity(name) {
                     None => errs.push(format!("unknown function `{name}`")),
-                    Some(n) if n != args.len() =>
-                        errs.push(format!("`{name}` takes {n} argument(s), got {}", args.len())),
+                    Some(n) if n != args.len() => errs.push(format!(
+                        "`{name}` takes {n} argument(s), got {}",
+                        args.len()
+                    )),
                     _ => {}
                 }
-                for a in args { a.check(known, errs); }
+                for a in args {
+                    a.check(known, errs);
+                }
             }
         }
     }
@@ -249,7 +330,10 @@ impl Expr {
             Expr::Var(n) => env(n).ok_or_else(|| format!("unbound variable `{n}`")),
             Expr::Unary(op, e) => match (op, e.eval(env)?) {
                 (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
-                (UnOp::Neg, Value::Int(n)) => n.checked_neg().map(Value::Int).ok_or_else(|| "integer overflow".into()),
+                (UnOp::Neg, Value::Int(n)) => n
+                    .checked_neg()
+                    .map(Value::Int)
+                    .ok_or_else(|| "integer overflow".into()),
                 (_, v) => Err(format!("cannot apply unary operator to {}", v.type_name())),
             },
             Expr::Bin(BinOp::And, a, b) => match a.eval(env)? {
@@ -264,7 +348,10 @@ impl Expr {
             },
             Expr::Bin(op, a, b) => binary(*op, a.eval(env)?, b.eval(env)?),
             Expr::Call(name, args) => {
-                let vals = args.iter().map(|a| a.eval(env)).collect::<Result<Vec<_>, _>>()?;
+                let vals = args
+                    .iter()
+                    .map(|a| a.eval(env))
+                    .collect::<Result<Vec<_>, _>>()?;
                 call(name, &vals)
             }
         }
@@ -272,7 +359,10 @@ impl Expr {
 }
 
 fn expect_bool(v: Value) -> Result<Value, String> {
-    match v { Value::Bool(_) => Ok(v), o => Err(format!("expected bool, got {}", o.type_name())) }
+    match v {
+        Value::Bool(_) => Ok(v),
+        o => Err(format!("expected bool, got {}", o.type_name())),
+    }
 }
 
 fn binary(op: BinOp, a: Value, b: Value) -> Result<Value, String> {
@@ -296,17 +386,31 @@ fn binary(op: BinOp, a: Value, b: Value) -> Result<Value, String> {
         (Le, Str(x), Str(y)) => Ok(Bool(x <= y)),
         (Gt, Str(x), Str(y)) => Ok(Bool(x > y)),
         (Ge, Str(x), Str(y)) => Ok(Bool(x >= y)),
-        (op, x, y) => Err(format!("cannot apply {op:?} to {} and {}", x.type_name(), y.type_name())),
+        (op, x, y) => Err(format!(
+            "cannot apply {op:?} to {} and {}",
+            x.type_name(),
+            y.type_name()
+        )),
     }
 }
 
 fn string_arg<'a>(f: &str, v: &'a Value) -> Result<&'a str, String> {
-    match v { Value::Str(s) => Ok(s), o => Err(format!("`{f}` needs a string, got {}", o.type_name())) }
+    match v {
+        Value::Str(s) => Ok(s),
+        o => Err(format!("`{f}` needs a string, got {}", o.type_name())),
+    }
 }
 
 fn call(name: &str, a: &[Value]) -> Result<Value, String> {
     match name {
-        "basename" => Ok(Value::Str(string_arg(name, &a[0])?.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string())),
+        "basename" => Ok(Value::Str(
+            string_arg(name, &a[0])?
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .to_string(),
+        )),
         "dirname" => {
             let s = string_arg(name, &a[0])?.trim_end_matches('/');
             Ok(Value::Str(match s.rfind('/') {
@@ -319,8 +423,14 @@ fn call(name: &str, a: &[Value]) -> Result<Value, String> {
         "lower" => Ok(Value::Str(string_arg(name, &a[0])?.to_lowercase())),
         "upper" => Ok(Value::Str(string_arg(name, &a[0])?.to_uppercase())),
         "str" => Ok(Value::Str(a[0].to_string())),
-        "int" => string_arg(name, &a[0])?.trim().parse().map(Value::Int).map_err(|_| "int(): not an integer".to_string()),
-        "contains" => Ok(Value::Bool(string_arg(name, &a[0])?.contains(string_arg(name, &a[1])?))),
+        "int" => string_arg(name, &a[0])?
+            .trim()
+            .parse()
+            .map(Value::Int)
+            .map_err(|_| "int(): not an integer".to_string()),
+        "contains" => Ok(Value::Bool(
+            string_arg(name, &a[0])?.contains(string_arg(name, &a[1])?),
+        )),
         _ => Err(format!("unknown function `{name}`")),
     }
 }
@@ -332,27 +442,40 @@ fn call(name: &str, a: &[Value]) -> Result<Value, String> {
 pub struct Template(Vec<Part>);
 
 #[derive(Debug, Clone)]
-enum Part { Lit(String), Expr(Expr) }
+enum Part {
+    Lit(String),
+    Expr(Expr),
+}
 
-pub fn is_template(src: &str) -> bool { src.contains("${") }
+pub fn is_template(src: &str) -> bool {
+    src.contains("${")
+}
 
 impl Template {
     pub fn parse(src: &str) -> Result<Template, String> {
         let mut parts = Vec::new();
         let mut rest = src;
         while let Some(start) = rest.find("${") {
-            if start > 0 { parts.push(Part::Lit(rest[..start].to_string())); }
+            if start > 0 {
+                parts.push(Part::Lit(rest[..start].to_string()));
+            }
             let body = &rest[start + 2..];
             let end = find_close(body).ok_or("unterminated `${`")?;
             parts.push(Part::Expr(parse(&body[..end])?));
             rest = &body[end + 1..];
         }
-        if !rest.is_empty() { parts.push(Part::Lit(rest.to_string())); }
+        if !rest.is_empty() {
+            parts.push(Part::Lit(rest.to_string()));
+        }
         Ok(Template(parts))
     }
 
     pub fn check(&self, known: &dyn Fn(&str) -> bool, errs: &mut Vec<String>) {
-        for p in &self.0 { if let Part::Expr(e) = p { e.check(known, errs); } }
+        for p in &self.0 {
+            if let Part::Expr(e) = p {
+                e.check(known, errs);
+            }
+        }
     }
 
     pub fn render(&self, env: Env) -> Result<String, String> {
@@ -374,7 +497,13 @@ fn find_close(s: &str) -> Option<usize> {
     for (i, c) in s.char_indices() {
         match quote {
             Some(q) => {
-                if esc { esc = false } else if c == '\\' { esc = true } else if c == q { quote = None }
+                if esc {
+                    esc = false
+                } else if c == '\\' {
+                    esc = true
+                } else if c == q {
+                    quote = None
+                }
             }
             None => match c {
                 '\'' | '"' => quote = Some(c),
@@ -445,6 +574,61 @@ mod tests {
     }
 
     #[test]
+    fn operator_and_helper_edge_cases() {
+        let t = Ok(Value::Bool(true));
+        assert_eq!(ev("'a' < 'b' && 'b' <= 'b' && 'c' > 'b' && 'c' >= 'c'"), t);
+        assert_eq!(ev("1 < 2 && 2 <= 2 && 3 > 2 && 3 >= 3 && 1 != 2"), t);
+        assert_eq!(ev("true != false"), t);
+        assert_eq!(ev("'a' + 'b' == 'ab'"), t);
+        assert_eq!(ev("7 - 2 * 3"), Ok(Value::Int(1)));
+        assert_eq!(ev("lower('AbC') == 'abc'"), t);
+        assert_eq!(
+            ev("dirname('/a') + dirname('a') + dirname('/x/y/')"),
+            Ok(Value::Str("/./x".into()))
+        );
+        assert_eq!(ev("basename('/a/b/')"), Ok(Value::Str("b".into())));
+        assert_eq!(ev("str(true)"), Ok(Value::Str("true".into())));
+        assert_eq!(ev("\"q\\\"\" + 'a\\nb'"), Ok(Value::Str("q\"a\nb".into())));
+        assert_eq!(Value::Int(1).type_name(), "int");
+        assert_eq!(Value::Bool(true).type_name(), "bool");
+    }
+
+    #[test]
+    fn type_and_syntax_errors() {
+        for bad in [
+            "!1",
+            "-'a'",
+            "1 && true",
+            "true && 1",
+            "false || 1",
+            "1 || true",
+            "- 9223372036854775807 - 2",
+            "1 < 'a'",
+            "true + true",
+            "len(1)",
+            "int('x')",
+            "contains(1, 'a')",
+            "nope(1)",
+            "1 $ 2",
+            "len(",
+            "len(1,",
+            "len('a' 'b')",
+            "",
+            ")",
+            "f(1 2)",
+            "1 +* 2",
+            "1 ! 2",
+        ] {
+            assert!(ev(bad).is_err(), "{bad:?} should error");
+        }
+        assert_eq!(ev("-9223372036854775807 - 1"), Ok(Value::Int(i64::MIN)));
+        assert!(
+            ev("-(-9223372036854775807 - 1)").is_err(),
+            "negating i64::MIN overflows"
+        );
+    }
+
+    #[test]
     fn deep_nesting_is_rejected() {
         let src = "(".repeat(10_000) + "1" + &")".repeat(10_000);
         assert!(parse(&src).is_err());
@@ -464,7 +648,9 @@ mod tests {
     fn static_check() {
         let known = |n: &str| n == "a";
         let mut errs = vec![];
-        parse("a + b + nope(1) + len(1, 2)").unwrap().check(&known, &mut errs);
+        parse("a + b + nope(1) + len(1, 2)")
+            .unwrap()
+            .check(&known, &mut errs);
         assert_eq!(errs.len(), 3, "{errs:?}");
     }
 }

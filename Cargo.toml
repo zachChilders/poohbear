@@ -6,6 +6,14 @@ members = ["crates/hp-core", "crates/hp-log", "crates/hp-track", "crates/hp-prot
 edition = "2021"
 license = "MIT"
 
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"

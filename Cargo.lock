@@ -222,6 +222,7 @@ name = "hp-bin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "futures-util",
  "hp-core",
@@ -268,6 +269,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "hp-core",
+ "hp-log",
  "serde_json",
  "tokio",
 ]

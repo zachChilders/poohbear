@@ -13,6 +13,9 @@ use hp_core::{Action, Event};
 use crate::expr::Value;
 use crate::track::{Delay, EventKind, Rule, Setter, Step, Track};
 
+/// Longest string a variable may hold; keeps a hostile session from growing memory.
+const MAX_VAR_LEN: usize = 64 * 1024;
+
 /// What one event produced.
 #[derive(Debug, Default)]
 pub struct Outcome {
@@ -34,18 +37,28 @@ pub struct Session {
 
 impl Session {
     pub fn new(track: Arc<Track>, seed: u64) -> Session {
-        Session { state: track.start.clone(), vars: track.vars.clone(), track, rng: SplitMix64(seed) }
+        Session {
+            state: track.start.clone(),
+            vars: track.vars.clone(),
+            track,
+            rng: SplitMix64(seed),
+        }
     }
 
-    pub fn state(&self) -> &str { &self.state }
-    pub fn vars(&self) -> &BTreeMap<String, Value> { &self.vars }
+    pub fn state(&self) -> &str {
+        &self.state
+    }
+    pub fn vars(&self) -> &BTreeMap<String, Value> {
+        &self.vars
+    }
 
     pub fn step(&mut self, ev: &Event) -> Outcome {
         let track = self.track.clone();
         let mut out = Outcome::default();
         let (kind, mut env) = event_env(ev);
         let Some(state) = track.states.get(&self.state) else {
-            out.errors.push(format!("session is in unknown state `{}`", self.state));
+            out.errors
+                .push(format!("session is in unknown state `{}`", self.state));
             return out;
         };
         for (i, rule) in state.rules.iter().enumerate() {
@@ -56,7 +69,9 @@ impl Session {
                     return out;
                 }
                 Ok(None) => {}
-                Err(e) => out.errors.push(format!("state `{}` rule #{}: {e}", self.state, i + 1)),
+                Err(e) => out
+                    .errors
+                    .push(format!("state `{}` rule #{}: {e}", self.state, i + 1)),
             }
         }
         self.run(&state.fallback, &mut env, &mut out);
@@ -64,18 +79,37 @@ impl Session {
     }
 
     /// Ok(Some(captures)) if the rule matches.
-    fn try_rule(&self, rule: &Rule, kind: EventKind, env: &HashMap<String, Value>) -> Result<Option<HashMap<String, Value>>, String> {
-        if rule.matcher.event.is_some_and(|k| k != kind) { return Ok(None); }
+    fn try_rule(
+        &self,
+        rule: &Rule,
+        kind: EventKind,
+        env: &HashMap<String, Value>,
+    ) -> Result<Option<HashMap<String, Value>>, String> {
+        if rule.matcher.event.is_some_and(|k| k != kind) {
+            return Ok(None);
+        }
         let mut caps = HashMap::new();
         for (field, re) in &rule.matcher.fields {
-            let Some(Value::Str(text)) = env.get(*field) else { return Ok(None) };
-            let Some(c) = re.captures(text) else { return Ok(None) };
+            let Some(Value::Str(text)) = env.get(*field) else {
+                return Ok(None);
+            };
+            let Some(c) = re.captures(text) else {
+                return Ok(None);
+            };
             for name in re.capture_names().flatten() {
-                caps.insert(name.to_string(), Value::Str(c.name(name).map_or("", |m| m.as_str()).to_string()));
+                caps.insert(
+                    name.to_string(),
+                    Value::Str(c.name(name).map_or("", |m| m.as_str()).to_string()),
+                );
             }
         }
         if let Some(when) = &rule.when {
-            let lookup = |n: &str| caps.get(n).or_else(|| env.get(n)).or_else(|| self.vars.get(n)).cloned();
+            let lookup = |n: &str| {
+                caps.get(n)
+                    .or_else(|| env.get(n))
+                    .or_else(|| self.vars.get(n))
+                    .cloned()
+            };
             match when.eval(&lookup)? {
                 Value::Bool(true) => {}
                 Value::Bool(false) => return Ok(None),
@@ -100,10 +134,17 @@ impl Session {
                         let r = match setter {
                             Setter::Lit(v) => Ok(v.clone()),
                             Setter::Expr(e) => e.eval(&|n| self.lookup(env, n)),
-                            Setter::Template(t) => t.render(&|n| self.lookup(env, n)).map(Value::Str),
+                            Setter::Template(t) => {
+                                t.render(&|n| self.lookup(env, n)).map(Value::Str)
+                            }
                         };
                         match r {
-                            Ok(v) => { self.vars.insert(name.clone(), v); }
+                            Ok(Value::Str(s)) if s.len() > MAX_VAR_LEN => out
+                                .errors
+                                .push(format!("set {name}: value exceeds {MAX_VAR_LEN} bytes")),
+                            Ok(v) => {
+                                self.vars.insert(name.clone(), v);
+                            }
                             Err(e) => out.errors.push(format!("set {name}: {e}")),
                         }
                     }
@@ -126,7 +167,9 @@ impl Session {
 
     fn jitter(&mut self, d: Delay) -> Duration {
         let span = d.max.saturating_sub(d.min).as_millis() as u64;
-        if span == 0 { return d.min; }
+        if span == 0 {
+            return d.min;
+        }
         d.min + Duration::from_millis(self.rng.next() % (span + 1))
     }
 }
@@ -153,7 +196,10 @@ fn event_env(ev: &Event) -> (EventKind, HashMap<String, Value>) {
             EventKind::Request
         }
         Event::Raw(b) => {
-            env.insert("raw".into(), Value::Str(String::from_utf8_lossy(b).into_owned()));
+            env.insert(
+                "raw".into(),
+                Value::Str(String::from_utf8_lossy(b).into_owned()),
+            );
             EventKind::Raw
         }
     };

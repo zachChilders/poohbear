@@ -36,11 +36,23 @@ pub struct Limits {
     #[serde(default = "d_input")]
     pub max_input_bytes: String,
 }
-fn d_sessions() -> usize { 256 }
-fn d_timeout() -> String { "15m".into() }
-fn d_input() -> String { "1MiB".into() }
+fn d_sessions() -> usize {
+    256
+}
+fn d_timeout() -> String {
+    "15m".into()
+}
+fn d_input() -> String {
+    "1MiB".into()
+}
 impl Default for Limits {
-    fn default() -> Self { Self { max_sessions: d_sessions(), session_timeout: d_timeout(), max_input_bytes: d_input() } }
+    fn default() -> Self {
+        Self {
+            max_sessions: d_sessions(),
+            session_timeout: d_timeout(),
+            max_input_bytes: d_input(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -48,15 +60,23 @@ impl Default for Limits {
 pub struct Logging {
     /// JSONL session log path; stdout if unset.
     pub json: Option<PathBuf>,
-    pub pcap: Option<PathBuf>,
 }
 
 impl Config {
     pub fn load(path: &std::path::Path) -> anyhow::Result<Config> {
-        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let cfg: Config = serde_yaml::from_str(&text).context("parsing config")?;
-        if cfg.listen.is_empty() { bail!("`listen` must contain at least one address"); }
-        if cfg.limits.max_sessions == 0 { bail!("limits.max_sessions must be > 0"); }
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        Config::parse(&text)
+    }
+
+    pub fn parse(text: &str) -> anyhow::Result<Config> {
+        let cfg: Config = serde_yaml::from_str(text).context("parsing config")?;
+        if cfg.listen.is_empty() {
+            bail!("`listen` must contain at least one address");
+        }
+        if cfg.limits.max_sessions == 0 {
+            bail!("limits.max_sessions must be > 0");
+        }
         cfg.session_timeout()?;
         cfg.max_input_bytes()?;
         Ok(cfg)
@@ -66,7 +86,9 @@ impl Config {
         humantime::parse_duration(&self.limits.session_timeout).context("limits.session_timeout")
     }
 
-    pub fn max_input_bytes(&self) -> anyhow::Result<u64> { parse_size(&self.limits.max_input_bytes) }
+    pub fn max_input_bytes(&self) -> anyhow::Result<u64> {
+        parse_size(&self.limits.max_input_bytes)
+    }
 }
 
 pub fn parse_size(s: &str) -> anyhow::Result<u64> {
@@ -95,7 +117,26 @@ mod tests {
         assert!(parse_size("MiB").is_err());
     }
     #[test]
+    fn defaults_and_accessors() {
+        let c = Config::parse("protocol: banner\nlisten: ['127.0.0.1:1']").unwrap();
+        assert_eq!(c.limits.max_sessions, 256);
+        assert_eq!(c.session_timeout().unwrap(), Duration::from_secs(900));
+        assert_eq!(c.max_input_bytes().unwrap(), 1 << 20);
+    }
+    #[test]
+    fn rejects_bad_values() {
+        let base = "protocol: banner\nlisten: ['127.0.0.1:1']\n";
+        assert!(Config::parse("protocol: banner\nlisten: []").is_err());
+        assert!(Config::parse(&format!("{base}limits: {{ max_sessions: 0 }}")).is_err());
+        assert!(Config::parse(&format!("{base}limits: {{ session_timeout: soon }}")).is_err());
+        assert!(Config::parse(&format!("{base}limits: {{ max_input_bytes: 1XB }}")).is_err());
+        assert!(Config::load(std::path::Path::new("/nonexistent/x.yaml")).is_err());
+    }
+    #[test]
     fn rejects_unknown_fields() {
-        assert!(serde_yaml::from_str::<Config>("protocol: banner\nlisten: ['127.0.0.1:1']\nbogus: 1").is_err());
+        assert!(serde_yaml::from_str::<Config>(
+            "protocol: banner\nlisten: ['127.0.0.1:1']\nbogus: 1"
+        )
+        .is_err());
     }
 }

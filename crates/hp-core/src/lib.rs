@@ -19,11 +19,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStream for T {}
 #[derive(Clone)]
 pub struct Secret(String);
 impl Secret {
-    pub fn new(s: impl Into<String>) -> Self { Self(s.into()) }
-    pub fn expose(&self) -> &str { &self.0 }
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
 }
 impl std::fmt::Debug for Secret {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("Secret(***)") }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(***)")
+    }
 }
 
 /// plugin -> engine
