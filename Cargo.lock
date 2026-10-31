@@ -957,6 +957,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hp-world"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hp-core",
+ "regex",
+ "serde",
+ "serde_yaml",
+]
+
+[[package]]
 name = "humantime"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

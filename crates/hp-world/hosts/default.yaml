@@ -1,0 +1,67 @@
+# The emulated machine. Every protocol that serves this host sees the same
+# identity, users, files and processes, so a scanner correlating SSH with
+# Telnet or HTTP finds one consistent box.
+#
+# Omitted pieces are generated: the directory skeleton, /etc/passwd, /etc/group,
+# /etc/shadow, /etc/os-release, /etc/hostname, /proc/{version,cpuinfo,meminfo},
+# and each user's home with dotfiles. Anything under `files:` overrides them.
+hostname: plc-gw-03
+
+os:
+  id: ubuntu
+  name: Ubuntu
+  pretty_name: "Ubuntu 22.04.3 LTS"
+  version: "22.04.3 LTS (Jammy Jellyfish)"
+  version_id: "22.04"
+  codename: jammy
+
+kernel:
+  release: "5.15.0-91-generic"
+  version: "#101-Ubuntu SMP Tue Nov 14 13:30:08 UTC 2023"
+  machine: x86_64
+
+uptime_secs: 3567420
+cpu: { model: "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz", cores: 2 }
+memory_kb: { total: 4025016, free: 1203412 }
+login_from: 10.20.0.14
+
+users:
+  - { name: root, uid: 0, home: /root }
+  - { name: admin, uid: 1000, home: /home/admin, groups: [admin, dialout] }
+  - { name: operator, uid: 1001, home: /home/operator }
+
+interfaces:
+  - { name: lo, addr: 127.0.0.1, netmask: 255.0.0.0 }
+  - { name: eth0, addr: 10.20.0.31, netmask: 255.255.255.0, mac: "00:50:56:a1:3c:9e" }
+
+processes:
+  - { user: root, pid: 1, cmd: /sbin/init }
+  - { user: root, pid: 412, cmd: /lib/systemd/systemd-journald }
+  - { user: root, pid: 598, cmd: /usr/sbin/cron -f -P }
+  - { user: root, pid: 643, cmd: /usr/sbin/sshd -D }
+  - { user: root, pid: 701, cmd: /usr/sbin/modbusd --config /etc/modbusd.conf }
+  - { user: root, pid: 877, cmd: /usr/bin/python3 /opt/plc/gateway.py }
+
+dirs:
+  - /opt/plc
+  - /var/log/plc
+
+files:
+  /etc/motd: ""
+  /etc/modbusd.conf: |
+    # Modbus/TCP gateway
+    listen = 0.0.0.0:502
+    unit_id = 1
+    poll_interval_ms = 250
+  /opt/plc/gateway.py: |
+    #!/usr/bin/env python3
+    # plc gateway: bridges field devices to the historian
+    import time
+    while True:
+        time.sleep(1)
+  /home/admin/notes.txt: |
+    TODO: rotate historian creds
+    plc-gw-02 firmware update scheduled for Q1
+  /var/log/plc/gateway.log: |
+    2025-10-30 08:12:44 INFO  link up: rtu0 -> 10.20.0.52
+    2025-10-30 08:12:45 INFO  poll cycle ok (12 registers)
