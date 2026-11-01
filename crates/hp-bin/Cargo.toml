@@ -19,6 +19,7 @@ futures-util = "0.3"
 hp-core.workspace = true
 hp-log.workspace = true
 hp-proto-banner.workspace = true
+hp-proto-ftp.workspace = true
 hp-proto-ssh.workspace = true
 hp-sandbox.workspace = true
 hp-track.workspace = true

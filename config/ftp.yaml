@@ -1,0 +1,15 @@
+# FTP honeypot (control channel only). Port 2121 so it runs unprivileged;
+# use a port forward (or CAP_NET_BIND_SERVICE) to expose it as 21.
+protocol: ftp
+listen:
+  - 127.0.0.1:2121
+persona:
+  hostname: plc-gw-03
+  banner: "(vsFTPd 3.0.3)"
+track: tracks/ftp-vsftpd.yaml
+limits:
+  max_sessions: 256
+  session_timeout: 15m
+  max_input_bytes: 1MiB
+logging:
+  json: /tmp/ftp-sessions.jsonl

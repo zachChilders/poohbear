@@ -10,11 +10,12 @@ Poohbear is a honeypot: a fake server that looks like a real, slightly neglected
 - **Plays along with malware downloads.** If the attacker runs `wget` or `curl` to pull down a payload, Poohbear pauses for a few seconds, prints a plausible download progress bar, and flags the attempt. Nothing is actually downloaded.
 - **Records every session.** Each connection becomes a log entry in `sessions.jsonl`: who connected, what credentials they tried, what they typed, and which of those moments looked interesting (a successful login, a payload fetch, a credential guess).
 
-It currently speaks two "languages":
+It currently speaks three "languages":
 
 | Mode | What it imitates |
 |------|------------------|
 | `ssh` | A Linux box with an SSH login and an interactive shell |
+| `ftp` | An old vsftpd: USER/PASS login, then a believable control channel. Transfers are refused (no data connections) but flagged |
 | `banner` | A simple text-based device on a raw TCP port (type `help`, `status`, `quit`) |
 
 ## Running it
@@ -32,6 +33,8 @@ ssh -p 2222 admin@127.0.0.1
 Any password will eventually work. Watch `sessions.jsonl` fill up with what you did.
 
 It listens on port 2222 so it doesn't need root. To expose it as a normal SSH port (22), forward the port to it.
+
+To try FTP, use `config/ftp.yaml` and connect with `ftp -p 127.0.0.1 2121`.
 
 To try the simple text-device version instead, use `config/banner.yaml` and connect with `nc 127.0.0.1 2323`.
 
@@ -55,11 +58,12 @@ Without a config file, `PORT` selects the protocol and its built-in track:
 
 ```
 PORT=22 honeypot
+PORT=21 honeypot
 PORT=2222 honeypot
 PORT=23 honeypot
 ```
 
-Ports 22 and 2222 use SSH; port 23 uses the raw banner service. `HONEYPOT_LOG`
+Ports 22 and 2222 use SSH; ports 21 and 2121 use FTP; port 23 uses the raw banner service. `HONEYPOT_LOG`
 sets the JSONL session log path (the default is stdout). For full control over
 listeners, tracks, persona, and limits, pass `--config` as shown above.
 
@@ -71,7 +75,8 @@ Ports below 1024 require root or `CAP_NET_BIND_SERVICE`.
 ## Not done yet
 
 - There is no fake file system yet, so `ls` and `cat` don't show anything realistic.
-- Only the two modes above exist.
+- FTP serves the control connection only: `PASV`/`PORT`/`LIST`/`STOR` are refused and tagged, so uploaded payloads are not captured.
+- Only the three modes above exist.
 
 ## License
 

@@ -34,6 +34,7 @@ fn plugin(cfg: &Config) -> anyhow::Result<Arc<dyn Protocol>> {
     }
     match cfg.protocol.as_str() {
         "banner" => Ok(Arc::new(hp_proto_banner::Banner)),
+        "ftp" => Ok(Arc::new(hp_proto_ftp::Ftp)),
         "ssh" => {
             let ssh = hp_proto_ssh::Ssh::new(cfg.persona.banner.as_deref())?;
             Ok(Arc::new(match &cfg.shell_broker {
@@ -41,7 +42,7 @@ fn plugin(cfg: &Config) -> anyhow::Result<Arc<dyn Protocol>> {
                 None => ssh,
             }))
         }
-        other => anyhow::bail!("unknown protocol {other:?} (available: banner, ssh)"),
+        other => anyhow::bail!("unknown protocol {other:?} (available: banner, ftp, ssh)"),
     }
 }
 
