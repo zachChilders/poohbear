@@ -56,6 +56,10 @@ pub enum Record {
         versions: Vec<String>,
         ja4: String,
     },
+    /// A UDP reply was not sent: it would have taken what we sent the peer
+    /// past 3x what the peer sent us (anti-reflection). The `tx` record just
+    /// before it shows what was dropped.
+    UdpReplyDropped { len: usize },
     /// A TLS listener received something other than a TLS handshake (e.g.
     /// plain HTTP on 443). The session continues in plaintext.
     PlaintextOnTls,
@@ -255,6 +259,10 @@ mod tests {
                        "versions": ["1.3"], "ja4": "t13d0101h2_x_y"}),
             ),
             (Record::PlaintextOnTls, json!({"kind": "plaintext_on_tls"})),
+            (
+                Record::UdpReplyDropped { len: 30 },
+                json!({"kind": "udp_reply_dropped", "len": 30}),
+            ),
             (
                 Record::HttpRequest {
                     method: "GET".into(),

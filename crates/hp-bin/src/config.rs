@@ -20,10 +20,21 @@ pub enum TrackSource {
     Builtin(&'static str),
 }
 
+/// What the listeners speak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    #[default]
+    Tcp,
+    /// One session per peer address; see `udp`.
+    Udp,
+}
+
 /// Validated runtime configuration.
 #[derive(Debug)]
 pub struct Config {
     pub protocol: String,
+    pub transport: Transport,
     pub listen: Vec<SocketAddr>,
     pub persona: Persona,
     pub track: Option<TrackSource>,
@@ -110,8 +121,12 @@ impl Config {
         if raw.limits.max_sessions == 0 {
             bail!("limits.max_sessions must be > 0");
         }
+        if raw.transport == Transport::Udp && raw.tls.is_some() {
+            bail!("`tls` is not available with `transport: udp`");
+        }
         Ok(Config {
             protocol: raw.protocol,
+            transport: raw.transport,
             listen: raw.listen,
             persona: Persona {
                 hostname: raw.persona.hostname,
@@ -141,6 +156,8 @@ const DEFAULT_TLS_NAME: &str = "plc-gw-03";
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     protocol: String,
+    #[serde(default)]
+    transport: Transport,
     listen: Vec<SocketAddr>,
     #[serde(default)]
     persona: RawPersona,
@@ -273,6 +290,7 @@ mod tests {
         assert_eq!(c.limits.max_input_bytes, 1 << 20);
         assert!(c.track.is_none() && c.session_log.is_none() && c.shell_broker.is_none());
         assert!(c.tls.is_none());
+        assert_eq!(c.transport, Transport::Tcp);
     }
 
     #[test]
@@ -293,6 +311,16 @@ mod tests {
         assert_eq!(c.limits.session_timeout, Duration::from_secs(30));
         assert_eq!(c.limits.max_input_bytes, 2048);
         assert_eq!(c.session_log.as_deref(), Some(Path::new("/tmp/x.jsonl")));
+    }
+
+    #[test]
+    fn transport_is_tcp_or_udp_and_udp_has_no_tls() {
+        let c = Config::parse(&format!("{MIN}transport: udp")).unwrap();
+        assert_eq!(c.transport, Transport::Udp);
+        let err =
+            |extra: &str| format!("{:#}", Config::parse(&format!("{MIN}{extra}")).unwrap_err());
+        assert!(err("transport: sctp").contains("sctp"));
+        assert!(err("transport: udp\ntls: { cert: c, key: k }").contains("udp"));
     }
 
     #[test]

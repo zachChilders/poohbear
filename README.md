@@ -93,6 +93,22 @@ answered in plain text.
 - It never really runs anything the attacker types. Every response is made up.
 - It has caps on simultaneous visitors, session length and how much data it will accept, so it can't easily be overwhelmed.
 
+## UDP
+
+Set `transport: udp` in a config to listen on UDP instead of TCP (see
+`config/banner-udp.yaml`; try it with `nc -u 127.0.0.1 2323`). Each address that sends a
+datagram becomes its own session: every datagram is one piece of input, and every reply goes
+back as a datagram. A peer that stays quiet for 60 seconds is disconnected, so idle peers don't
+use up session slots. In the log these sessions show up as e.g. `banner/udp`.
+
+UDP sender addresses are easy to fake, so a careless UDP service can be tricked into flooding
+someone else. To prevent that, Poohbear never sends a peer more than three times what that peer
+sent it. Replies over that budget are dropped and logged as `udp_reply_dropped`. As a result, a
+tiny probe may get no reply at all, which is on purpose. When the session cap is full, new peers
+are ignored, and the rejection is logged at most once a second.
+
+Only `banner` can run over UDP so far. TLS is not available over UDP.
+
 ## Environment defaults and real shells
 
 Without a config file, `PORT` selects the protocol and its built-in track:
@@ -124,7 +140,8 @@ Ports below 1024 require root or `CAP_NET_BIND_SERVICE`.
 - FTP serves the control connection only: `PASV`/`PORT`/`LIST`/`STOR` are refused and tagged, so uploaded payloads are not captured.
 - HTTP is HTTP/1.x only; clients that insist on HTTP/2 can't connect. Login state is per
   connection, so a tool that opens a new connection for every guess never gets in.
-- Only the four modes above exist.
+- Only the four modes above exist, and only `banner` runs over UDP. UDP protocols such as SNMP
+  or DNS still need their own plugins.
 
 ## License
 

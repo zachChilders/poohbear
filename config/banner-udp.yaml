@@ -1,0 +1,18 @@
+# The text device over UDP: each peer address is one session, each datagram
+# one line of input, each reply one datagram. A peer that stays silent for
+# 60s is disconnected. Replies never exceed 3x what the peer sent, so the
+# listener cannot be used to flood a spoofed address.
+protocol: banner
+transport: udp
+listen:
+  - 127.0.0.1:2323
+persona:
+  hostname: plc-gw-03
+  banner: "plc-gw-03 ready"
+limits:
+  max_sessions: 256
+  session_timeout: 5m
+  max_input_bytes: 64KiB
+track: tracks/banner-demo.yaml
+logging:
+  json: ./sessions-udp.jsonl

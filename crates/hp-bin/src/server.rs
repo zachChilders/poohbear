@@ -1,6 +1,8 @@
-//! Accept loop and per-session supervision: connection cap, timeout and
-//! panic isolation, so one bad session can never take down the listener.
+//! Accept loops (TCP connections, UDP peers) and per-session supervision:
+//! connection cap, timeout and panic isolation, so one bad session can never
+//! take down the listener.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -8,8 +10,8 @@ use std::time::Duration;
 
 use futures_util::FutureExt;
 use hp_core::{AsyncStream, BehaviorFactory, Limits, Persona, Protocol, SessionCtx};
-use hp_log::{LogSink, Record, RejectReason};
-use tokio::net::TcpListener;
+use hp_log::{LogSink, Record, RejectReason, SessionLogger};
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Semaphore;
 
 /// Tunables for a [`Server`].
@@ -58,7 +60,9 @@ impl Server {
     pub async fn serve(self: Arc<Self>, listener: TcpListener) {
         loop {
             match listener.accept().await {
-                Ok((stream, peer)) => self.clone().spawn_session(stream, peer),
+                Ok((stream, peer)) => {
+                    self.clone().spawn_session(peer, false, |_| stream);
+                }
                 Err(e) => {
                     // e.g. out of file descriptors: back off instead of spinning.
                     tracing::warn!(error = %e, "accept failed");
@@ -82,16 +86,76 @@ impl Server {
         self.proto.handle(stream, ctx).await
     }
 
-    fn spawn_session<S: AsyncStream + 'static>(self: Arc<Self>, stream: S, peer: SocketAddr) {
+    /// Serve UDP: one session per peer address (see `udp`). Datagrams from a
+    /// peer with a live session go to it; any other starts a new session.
+    pub async fn serve_udp(self: Arc<Self>, socket: UdpSocket) {
+        let socket = Arc::new(socket);
+        let mut flows: HashMap<SocketAddr, crate::udp::Inbox> = HashMap::new();
+        let mut last_reject: Option<tokio::time::Instant> = None;
+        let mut buf = vec![0u8; 65536];
+        loop {
+            let (n, peer) = match socket.recv_from(&mut buf).await {
+                Ok(r) => r,
+                Err(e) => {
+                    // e.g. ICMP port unreachable surfacing as an error: keep going.
+                    tracing::debug!(error = %e, "udp receive failed");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
+            };
+            let datagram = bytes::Bytes::copy_from_slice(&buf[..n]);
+            if let Some(inbox) = flows.get(&peer) {
+                if inbox.deliver(datagram.clone()) {
+                    continue;
+                }
+                flows.remove(&peer);
+            }
+            flows.retain(|_, inbox| !inbox.is_closed());
+            // Spoofed floods while full would log every datagram; log at
+            // most one rejection per second.
+            if self.permits.available_permits() == 0 {
+                let now = tokio::time::Instant::now();
+                if last_reject.is_some_and(|t| now - t < Duration::from_secs(1)) {
+                    continue;
+                }
+                last_reject = Some(now);
+            }
+            let mut inbox = None;
+            let started = self.clone().spawn_session(peer, true, |log| {
+                let (flow, i) =
+                    crate::udp::flow(socket.clone(), peer, crate::udp::IDLE, log.clone());
+                inbox = Some(i);
+                flow
+            });
+            if let (true, Some(inbox)) = (started, inbox) {
+                inbox.deliver(datagram);
+                flows.insert(peer, inbox);
+            }
+        }
+    }
+
+    /// Start a session for `peer` with the stream `make` builds (it gets the
+    /// session's logger). Returns false if the session cap turned it away.
+    fn spawn_session<S, F>(self: Arc<Self>, peer: SocketAddr, udp: bool, make: F) -> bool
+    where
+        S: AsyncStream + 'static,
+        F: FnOnce(&SessionLogger) -> S,
+    {
         let id = uuid::Uuid::new_v4().to_string();
-        let log = self.sink.session(&id, peer, self.proto.name());
+        let label = if udp {
+            format!("{}/udp", self.proto.name())
+        } else {
+            self.proto.name().to_string()
+        };
+        let log = self.sink.session(&id, peer, &label);
         // Over the cap: drop the connection (closing it) rather than queue.
         let Ok(permit) = self.permits.clone().try_acquire_owned() else {
             log.event(Record::Rejected {
                 reason: RejectReason::MaxSessions,
             });
-            return;
+            return false;
         };
+        let stream = make(&log);
         let ctx = SessionCtx {
             session_id: id,
             peer,
@@ -114,6 +178,7 @@ impl Server {
             }
             log.event(Record::Disconnect);
         });
+        true
     }
 }
 
@@ -691,6 +756,153 @@ states:
             of("behavior_error").len() + of("error").len(),
             0,
             "{recs:?}"
+        );
+    }
+
+    /// The banner plugin and a track over UDP, on a real socket: each peer
+    /// is its own session, replies are datagrams, the log says `/udp`.
+    async fn udp_banner(max_sessions: usize) -> (SocketAddr, Receiver<String>) {
+        let track = hp_track::Track::from_yaml(
+            r#"
+name: demo
+start: s
+states:
+  s:
+    on:
+      - match: { raw: '^status' }
+        do: [ { tag: queried }, { send: "OK\r\n" } ]
+      - match: { raw: '^dump' }
+        do: [ { send: "0123456789012345678901234567890123456789\r\n" } ]
+    fallback: { send: "?\r\n" }
+"#,
+        )
+        .unwrap();
+        let (sink, rx) = LogSink::channel(256);
+        let settings = Settings {
+            limits: Limits {
+                session_timeout: LONG,
+                max_input_bytes: 1024,
+            },
+            persona: Persona {
+                hostname: None,
+                banner: Some("READY".into()),
+            },
+            max_sessions,
+            tls: None,
+        };
+        let server = Server::new(
+            Arc::new(hp_proto_banner::Banner),
+            Arc::new(TrackFactory::new(track)),
+            sink,
+            settings,
+        );
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        tokio::spawn(server.serve_udp(socket));
+        (addr, rx)
+    }
+
+    async fn recv(c: &UdpSocket) -> String {
+        let mut buf = [0u8; 2048];
+        let n = tokio::time::timeout(Duration::from_secs(5), c.recv(&mut buf))
+            .await
+            .expect("no reply")
+            .unwrap();
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    }
+
+    async fn records_until(rx: &mut Receiver<String>, kind: &str, count: usize) -> Vec<Value> {
+        let mut recs: Vec<Value> = vec![];
+        while recs.iter().filter(|r| r["kind"] == kind).count() < count {
+            let line = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("timed out")
+                .unwrap();
+            recs.push(serde_json::from_str(&line).unwrap());
+        }
+        recs
+    }
+
+    #[tokio::test]
+    async fn udp_peers_get_their_own_sessions_and_replies() {
+        let (addr, mut rx) = udp_banner(4).await;
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        a.connect(addr).await.unwrap();
+        b.connect(addr).await.unwrap();
+
+        a.send(b"status\n").await.unwrap();
+        assert_eq!(recv(&a).await, "READY\r\n", "greeting, as its own datagram");
+        assert_eq!(recv(&a).await, "OK\r\n");
+        b.send(b"hello\n").await.unwrap();
+        assert_eq!(recv(&b).await, "READY\r\n");
+        assert_eq!(recv(&b).await, "?\r\n");
+        a.send(b"again\n").await.unwrap();
+        assert_eq!(recv(&a).await, "?\r\n", "same session: no second greeting");
+
+        let recs = records_until(&mut rx, "rx", 3).await;
+        let sessions: std::collections::HashSet<_> = recs
+            .iter()
+            .map(|r| r["session"].as_str().unwrap())
+            .collect();
+        assert_eq!(sessions.len(), 2, "{recs:?}");
+        assert!(recs.iter().all(|r| r["protocol"] == "banner/udp"));
+        assert_eq!(recs.iter().filter(|r| r["kind"] == "connect").count(), 2);
+        assert!(recs
+            .iter()
+            .any(|r| r["kind"] == "tag" && r["tag"] == "queried"));
+    }
+
+    #[tokio::test]
+    async fn udp_replies_never_exceed_three_times_the_request() {
+        let (addr, mut rx) = udp_banner(4).await;
+        let c = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        c.connect(addr).await.unwrap();
+        // 5 bytes in: 15 bytes of budget. The 7-byte greeting fits; the
+        // 42-byte dump does not and is dropped.
+        c.send(b"dump\n").await.unwrap();
+        assert_eq!(recv(&c).await, "READY\r\n");
+        let recs = records_until(&mut rx, "udp_reply_dropped", 1).await;
+        let hit = recs
+            .iter()
+            .find(|r| r["kind"] == "udp_reply_dropped")
+            .unwrap();
+        assert_eq!(hit["len"], 42);
+        let mut buf = [0u8; 64];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), c.recv(&mut buf))
+                .await
+                .is_err(),
+            "nothing else was sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_peers_over_the_cap_are_dropped_and_logged_sparingly() {
+        let (addr, mut rx) = udp_banner(1).await;
+        let first = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        first.connect(addr).await.unwrap();
+        first.send(b"status\n").await.unwrap();
+        assert_eq!(recv(&first).await, "READY\r\n");
+        let other = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        other.connect(addr).await.unwrap();
+        for _ in 0..20 {
+            other.send(b"status\n").await.unwrap();
+        }
+        let mut buf = [0u8; 64];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), other.recv(&mut buf))
+                .await
+                .is_err(),
+            "no session, no reply"
+        );
+        let recs: Vec<Value> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|l| serde_json::from_str(&l).unwrap())
+            .collect();
+        let rejected = recs.iter().filter(|r| r["kind"] == "rejected").count();
+        assert_eq!(
+            rejected, 1,
+            "one rejection logged for 20 datagrams: {recs:?}"
         );
     }
 

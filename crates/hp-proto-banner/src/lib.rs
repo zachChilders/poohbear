@@ -25,6 +25,10 @@ impl Protocol for Banner {
         &[2323]
     }
 
+    fn supports_udp(&self) -> bool {
+        true
+    }
+
     async fn handle(
         &self,
         mut stream: Box<dyn AsyncStream>,
@@ -126,6 +130,7 @@ mod tests {
     fn metadata() {
         assert_eq!(Banner.name(), "banner");
         assert_eq!(Banner.default_ports(), [2323]);
+        assert!(Banner.supports_udp());
     }
 
     #[tokio::test]

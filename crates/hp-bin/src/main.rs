@@ -2,6 +2,7 @@ mod behavior;
 mod config;
 mod server;
 mod services;
+mod udp;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,12 +10,12 @@ use std::sync::Arc;
 use anyhow::Context;
 use behavior::TrackFactory;
 use clap::Parser;
-use config::{Config, TrackSource};
+use config::{Config, TrackSource, Transport};
 use hp_core::{BehaviorFactory, Passive, Protocol};
 use hp_log::LogSink;
 use hp_sandbox::ContainerBackend;
 use server::{Server, Settings};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UdpSocket};
 
 #[derive(Parser)]
 #[command(about = "Single-protocol honeypot")]
@@ -66,6 +67,9 @@ async fn main() -> anyhow::Result<()> {
         None => Config::from_env(|k| std::env::var(k).ok())?,
     };
     let proto = plugin(&cfg)?;
+    if cfg.transport == Transport::Udp && !proto.supports_udp() {
+        anyhow::bail!("the {} protocol cannot run over UDP", proto.name());
+    }
     // Fail closed: a missing or bad certificate means the honeypot does not start.
     let tls = match &cfg.tls {
         Some(source) => Some(Arc::new(hp_tls::Acceptor::new(source)?)),
@@ -99,11 +103,24 @@ async fn main() -> anyhow::Result<()> {
     let server = Server::new(proto, behavior, sink, settings);
 
     for addr in &cfg.listen {
-        let listener = TcpListener::bind(addr)
-            .await
-            .with_context(|| format!("binding {addr}"))?;
-        tracing::info!(%addr, protocol = server.protocol_name(), tls = cfg.tls.is_some(), "listening");
-        tokio::spawn(server.clone().serve(listener));
+        let protocol = server.protocol_name();
+        let tls = cfg.tls.is_some();
+        match cfg.transport {
+            Transport::Tcp => {
+                let listener = TcpListener::bind(addr)
+                    .await
+                    .with_context(|| format!("binding {addr}"))?;
+                tracing::info!(%addr, protocol, tls, transport = "tcp", "listening");
+                tokio::spawn(server.clone().serve(listener));
+            }
+            Transport::Udp => {
+                let socket = UdpSocket::bind(addr)
+                    .await
+                    .with_context(|| format!("binding udp {addr}"))?;
+                tracing::info!(%addr, protocol, transport = "udp", "listening");
+                tokio::spawn(server.clone().serve_udp(socket));
+            }
+        }
     }
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutting down");

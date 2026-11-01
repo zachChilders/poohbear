@@ -38,13 +38,19 @@ impl std::fmt::Debug for Secret {
 #[derive(Debug, Clone)]
 pub enum Event {
     Connected,
-    AuthAttempt { user: String, secret: Secret },
+    AuthAttempt {
+        user: String,
+        secret: Secret,
+    },
     Command(String),
     /// A request in a request/response protocol. `op` names it (HTTP:
     /// `"GET /path?q"`). Tracks see these string fields of `args` as
     /// variables: `method`, `path`, `query`, `headers`, `body`, and `user` /
     /// `password` when the request carried credentials.
-    Request { op: String, args: serde_json::Value },
+    Request {
+        op: String,
+        args: serde_json::Value,
+    },
     Raw(Bytes),
     Disconnected,
 }
@@ -148,6 +154,13 @@ pub struct SessionCtx {
 pub trait Protocol: Send + Sync {
     fn name(&self) -> &'static str;
     fn default_ports(&self) -> &[u16];
+    /// Whether the plugin can run over UDP. There, each datagram from a peer
+    /// arrives as one read and each write leaves as one datagram, so only
+    /// protocols that read whatever arrives (rather than a byte stream with
+    /// its own framing and handshakes) should say yes.
+    fn supports_udp(&self) -> bool {
+        false
+    }
     async fn handle(&self, stream: Box<dyn AsyncStream>, ctx: SessionCtx) -> anyhow::Result<()>;
 }
 
