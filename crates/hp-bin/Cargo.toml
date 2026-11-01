@@ -19,6 +19,7 @@ futures-util = "0.3"
 hp-core.workspace = true
 hp-log.workspace = true
 hp-proto-banner.workspace = true
+hp-proto-ssh.workspace = true
 hp-track.workspace = true
 humantime.workspace = true
 serde.workspace = true
@@ -29,5 +30,6 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+russh = { version = "0.65", default-features = false, features = ["ring"] }
 serde_json.workspace = true
 async-trait.workspace = true

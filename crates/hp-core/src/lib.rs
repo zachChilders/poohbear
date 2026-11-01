@@ -51,6 +51,9 @@ pub enum Action {
     Send(Bytes),
     AuthResult(bool),
     Delay(Duration),
+    /// Set the text shown before each input line in an interactive session
+    /// (a shell prompt). Plugins without an interactive prompt ignore it.
+    Prompt(String),
     Close,
 }
 

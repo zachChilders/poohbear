@@ -29,6 +29,18 @@ pub enum Record {
     Tx(Payload),
     /// A per-session limit was hit and the session was cut short.
     LimitExceeded { limit: Limit, total: u64 },
+    /// An authentication attempt and the verdict. `credential` is the
+    /// password, or the key fingerprint for public-key offers.
+    Auth {
+        user: String,
+        method: AuthMethod,
+        credential: String,
+        accepted: bool,
+    },
+    /// A command line the peer submitted.
+    Command { command: String, via: CommandSource },
+    /// A channel-level request or open (pty, shell, forwarding, ...).
+    ChannelRequest { request: ChannelRequestKind },
     /// The behavior flagged this moment for alerting (e.g. `payload_fetch`).
     Tag { tag: String },
     /// The behavior moved the session to another state.
@@ -41,6 +53,34 @@ pub enum Record {
 #[serde(rename_all = "snake_case")]
 pub enum RejectReason {
     MaxSessions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    None,
+    Password,
+    PublicKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandSource {
+    /// Typed into an interactive (or piped) shell.
+    Shell,
+    /// Sent as a one-shot `exec` request.
+    Exec,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelRequestKind {
+    Pty,
+    Shell,
+    Exec,
+    Subsystem,
+    /// A `direct-tcpip` open: the peer tried to use us as a proxy.
+    PortForward,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -134,6 +174,28 @@ mod tests {
                     total: 9,
                 },
                 json!({"kind": "limit_exceeded", "limit": "max_input_bytes", "total": 9}),
+            ),
+            (
+                Record::Auth {
+                    user: "root".into(),
+                    method: AuthMethod::Password,
+                    credential: "toor".into(),
+                    accepted: false,
+                },
+                json!({"kind": "auth", "user": "root", "method": "password", "credential": "toor", "accepted": false}),
+            ),
+            (
+                Record::Command {
+                    command: "ls".into(),
+                    via: CommandSource::Exec,
+                },
+                json!({"kind": "command", "command": "ls", "via": "exec"}),
+            ),
+            (
+                Record::ChannelRequest {
+                    request: ChannelRequestKind::PortForward,
+                },
+                json!({"kind": "channel_request", "request": "port_forward"}),
             ),
             (
                 Record::Tag { tag: "t".into() },
