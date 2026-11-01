@@ -1,18 +1,78 @@
-# poohbear: single-protocol honeypot
+# Poohbear
 
-One process serves one protocol. With no config file, the port decides:
+Poohbear is a honeypot: a fake server that looks like a real, slightly neglected machine on your network. Nothing legitimate should ever talk to it, so anyone who does is worth noticing. It lets attackers (and automated scanners) in, plays along, and writes down everything they do.
 
-    PORT=22 honeypot                      # ssh, scripted shell (built-in track)
-    PORT=2222 honeypot                    # also ssh
-    PORT=23 honeypot                      # raw banner service
-    PORT=22 HONEYPOT_BROKER=/run/honeypot/broker.sock honeypot   # ssh with real shells
+## What it does
 
-| Variable | Meaning |
-|---|---|
-| `PORT` | Listen port; looked up in `crates/hp-bin/src/services.rs` to pick the protocol and its built-in track. Unknown ports are refused with the list of known ones. |
-| `HONEYPOT_BROKER` | Broker socket; turns on real container shells (see `docker/README.md`). |
-| `HONEYPOT_LOG` | JSONL session log path (default: stdout). |
+- **Pretends to be a device.** Out of the box it poses as `plc-gw-03`, an Ubuntu gateway box that might sit in front of industrial equipment.
+- **Lets people "log in".** The first few password guesses fail, then the next one works. Once inside, the attacker gets a believable shell with a welcome message and a "last login" line.
+- **Answers commands convincingly.** `whoami`, `uname -a`, `pwd` and `cd` work. Anything unrecognized says "command not found", just like a real shell.
+- **Plays along with malware downloads.** If the attacker runs `wget` or `curl` to pull down a payload, Poohbear pauses for a few seconds, prints a plausible download progress bar, and flags the attempt. Nothing is actually downloaded.
+- **Records every session.** Each connection becomes a log entry in `sessions.jsonl`: who connected, what credentials they tried, what they typed, and which of those moments looked interesting (a successful login, a payload fetch, a credential guess).
 
-Ports below 1024 need `CAP_NET_BIND_SERVICE` or root. For full control (several
-listeners, custom tracks, persona, limits) pass `--config` (examples in `config/`).
-To add a protocol: write the plugin, register it in `main.rs`, add a row in `services.rs`.
+It currently speaks two "languages":
+
+| Mode | What it imitates |
+|------|------------------|
+| `ssh` | A Linux box with an SSH login and an interactive shell |
+| `banner` | A simple text-based device on a raw TCP port (type `help`, `status`, `quit`) |
+
+## Running it
+
+```
+cargo run -p hp-bin -- --config config/ssh.yaml
+```
+
+Then, from another terminal:
+
+```
+ssh -p 2222 admin@127.0.0.1
+```
+
+Any password will eventually work. Watch `sessions.jsonl` fill up with what you did.
+
+It listens on port 2222 so it doesn't need root. To expose it as a normal SSH port (22), forward the port to it.
+
+To try the simple text-device version instead, use `config/banner.yaml` and connect with `nc 127.0.0.1 2323`.
+
+## Changing how it behaves
+
+You don't need to touch any code to change the personality. Two small files control everything:
+
+- **A config file** (`config/*.yaml`) says what to pretend to be: the hostname, the version banner, which port to listen on, how many visitors at once, how long a session may last, and where to write the log.
+- **A track file** (`tracks/*.yaml`) is the script: who gets in, what each command prints, how long to hesitate, and what to flag as suspicious. Edit `tracks/ssh-linux-gateway.yaml` to add new commands or change the welcome message.
+
+If a track file has a mistake, Poohbear refuses to start rather than running half-broken.
+
+## Safe by design
+
+- It never really runs anything the attacker types. Every response is made up.
+- It has caps on simultaneous visitors, session length and how much data it will accept, so it can't easily be overwhelmed.
+
+## Environment defaults and real shells
+
+Without a config file, `PORT` selects the protocol and its built-in track:
+
+```
+PORT=22 honeypot
+PORT=2222 honeypot
+PORT=23 honeypot
+```
+
+Ports 22 and 2222 use SSH; port 23 uses the raw banner service. `HONEYPOT_LOG`
+sets the JSONL session log path (the default is stdout). For full control over
+listeners, tracks, persona, and limits, pass `--config` as shown above.
+
+To enable real disposable container shells for SSH sessions, set
+`HONEYPOT_BROKER` to the broker socket path. The honeypot does not access Docker
+directly; see [docker/README.md](docker/README.md) for setup and security details.
+Ports below 1024 require root or `CAP_NET_BIND_SERVICE`.
+
+## Not done yet
+
+- There is no fake file system yet, so `ls` and `cat` don't show anything realistic.
+- Only the two modes above exist.
+
+## License
+
+MIT
