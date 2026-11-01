@@ -9,13 +9,23 @@ use anyhow::{bail, Context};
 use hp_core::{Limits, Persona};
 use serde::Deserialize;
 
+use crate::services;
+
+/// Where the session's behavior (track) comes from.
+#[derive(Debug, PartialEq)]
+pub enum TrackSource {
+    File(PathBuf),
+    /// YAML compiled into the binary (see `services`).
+    Builtin(&'static str),
+}
+
 /// Validated runtime configuration.
 #[derive(Debug)]
 pub struct Config {
     pub protocol: String,
     pub listen: Vec<SocketAddr>,
     pub persona: Persona,
-    pub track: Option<PathBuf>,
+    pub track: Option<TrackSource>,
     /// Per-session limits handed to plugins.
     pub limits: Limits,
     /// Concurrent session cap, enforced by the server.
@@ -33,6 +43,40 @@ impl Config {
         Config::parse(&text)
     }
 
+    /// Configuration inferred from the environment alone: `PORT` picks the
+    /// protocol and its built-in track; `HONEYPOT_BROKER` (a socket path)
+    /// turns on real shells; `HONEYPOT_LOG` sends session records to a file.
+    pub fn from_env(var: impl Fn(&str) -> Option<String>) -> anyhow::Result<Config> {
+        let port: u16 = var("PORT")
+            .context("set PORT (or pass --config)")?
+            .trim()
+            .parse()
+            .context("PORT must be a port number")?;
+        let service = services::for_port(port).with_context(|| {
+            format!(
+                "no protocol is known for port {port} (known: {})",
+                services::known_ports()
+            )
+        })?;
+        let shell_broker = var("HONEYPOT_BROKER").map(PathBuf::from);
+        let track = match (&shell_broker, service.shell_track) {
+            (None, _) => service.track,
+            (Some(_), Some(track)) => track,
+            (Some(_), None) => bail!(
+                "{} cannot serve real shells (HONEYPOT_BROKER)",
+                service.protocol
+            ),
+        };
+        let mut cfg = Config::parse(&format!(
+            "protocol: {}\nlisten: ['0.0.0.0:{port}']\n",
+            service.protocol
+        ))?;
+        cfg.track = Some(TrackSource::Builtin(track));
+        cfg.shell_broker = shell_broker;
+        cfg.session_log = var("HONEYPOT_LOG").map(PathBuf::from);
+        Ok(cfg)
+    }
+
     pub fn parse(text: &str) -> anyhow::Result<Config> {
         let raw: RawConfig = serde_yaml::from_str(text).context("parsing config")?;
         if raw.listen.is_empty() {
@@ -48,7 +92,7 @@ impl Config {
                 hostname: raw.persona.hostname,
                 banner: raw.persona.banner,
             },
-            track: raw.track,
+            track: raw.track.map(TrackSource::File),
             limits: Limits {
                 session_timeout: humantime::parse_duration(&raw.limits.session_timeout)
                     .context("limits.session_timeout")?,
@@ -183,11 +227,58 @@ mod tests {
             (c.persona.hostname.as_deref(), c.persona.banner.as_deref()),
             (Some("h"), Some("b"))
         );
-        assert_eq!(c.track.as_deref(), Some(Path::new("t.yaml")));
+        assert_eq!(c.track, Some(TrackSource::File("t.yaml".into())));
         assert_eq!(c.max_sessions, 3);
         assert_eq!(c.limits.session_timeout, Duration::from_secs(30));
         assert_eq!(c.limits.max_input_bytes, 2048);
         assert_eq!(c.session_log.as_deref(), Some(Path::new("/tmp/x.jsonl")));
+    }
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn the_port_alone_picks_protocol_and_track() {
+        let c = Config::from_env(env(&[("PORT", "22")])).unwrap();
+        assert_eq!(c.protocol, "ssh");
+        assert_eq!(c.listen, ["0.0.0.0:22".parse().unwrap()]);
+        assert!(
+            matches!(c.track, Some(TrackSource::Builtin(t)) if t.contains("ssh-linux-gateway"))
+        );
+        assert!(c.shell_broker.is_none() && c.session_log.is_none());
+        assert_eq!(
+            Config::from_env(env(&[("PORT", " 23 ")])).unwrap().protocol,
+            "banner"
+        );
+    }
+
+    #[test]
+    fn a_broker_switches_to_the_real_shell_track() {
+        let c = Config::from_env(env(&[
+            ("PORT", "2222"),
+            ("HONEYPOT_BROKER", "/run/b.sock"),
+            ("HONEYPOT_LOG", "/tmp/s.jsonl"),
+        ]))
+        .unwrap();
+        assert!(matches!(c.track, Some(TrackSource::Builtin(t)) if t.contains("ssh-real-shell")));
+        assert_eq!(c.shell_broker.as_deref(), Some(Path::new("/run/b.sock")));
+        assert_eq!(c.session_log.as_deref(), Some(Path::new("/tmp/s.jsonl")));
+    }
+
+    #[test]
+    fn environment_mistakes_are_explained() {
+        let err =
+            |pairs: &[(&str, &str)]| format!("{:#}", Config::from_env(env(pairs)).unwrap_err());
+        assert!(err(&[]).contains("PORT"));
+        assert!(err(&[("PORT", "ssh")]).contains("port number"));
+        assert!(err(&[("PORT", "9")]).contains("22 (ssh)"));
+        assert!(err(&[("PORT", "23"), ("HONEYPOT_BROKER", "/x")]).contains("real shells"));
     }
 
     #[test]
