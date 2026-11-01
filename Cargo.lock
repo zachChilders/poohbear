@@ -821,6 +821,7 @@ dependencies = [
  "hp-core",
  "hp-log",
  "hp-proto-banner",
+ "hp-proto-ftp",
  "hp-proto-ssh",
  "hp-sandbox",
  "hp-track",
@@ -898,6 +899,21 @@ dependencies = [
  "bytes",
  "hp-core",
  "hp-kit",
+ "hp-testkit",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "hp-proto-ftp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "hp-core",
+ "hp-kit",
+ "hp-log",
  "hp-testkit",
  "serde_json",
  "tokio",

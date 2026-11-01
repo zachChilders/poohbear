@@ -1,0 +1,57 @@
+# Track for the `ftp` plugin: an old vsftpd on a neglected gateway box.
+# The plugin handles the control connection only (no data connections), so
+# transfers are refused with 425 and flagged: what someone *tried* to fetch or
+# upload is the interesting part.
+# - USER arrives as a `command` (reply 331); PASS arrives as `auth_attempt`.
+#   Text sent next to `auth` is the reply line for either outcome.
+# - replies must end in "\r\n".
+name: ftp-vsftpd
+vars:
+  failed_logins: 0
+  cwd: /
+start: auth
+
+states:
+  auth:
+    on:
+      - match: { event: connected }
+        do: [ { send: "220 (vsFTPd 3.0.3)\r\n" } ]
+      - match: { command: "(?i)^USER " }
+        do: [ { send: "331 Please specify the password.\r\n" } ]
+      - match: { event: auth_attempt }
+        when: "failed_logins < 3"
+        do:
+          - set: { failed_logins: "failed_logins + 1" }
+          - delay: 800ms..1500ms
+          - auth: false
+          - send: "530 Login incorrect.\r\n"
+      - match: { event: auth_attempt }
+        do:
+          - tag: auth_success
+          - delay: 300ms
+          - auth: true
+          - send: "230 Login successful.\r\n"
+          - goto: session
+      - match: { command: "(?i)^QUIT" }
+        do: [ { send: "221 Goodbye.\r\n" }, { close: true } ]
+    fallback: { send: "530 Please login with USER and PASS.\r\n" }
+
+  session:
+    on:
+      - match: { command: "(?i)^SYST" }
+        do: [ { send: "215 UNIX Type: L8\r\n" } ]
+      - match: { command: "(?i)^FEAT" }
+        do: [ { send: "211-Features:\r\n EPRT\r\n EPSV\r\n MDTM\r\n PASV\r\n SIZE\r\n UTF8\r\n211 End\r\n" } ]
+      - match: { command: "(?i)^PWD" }
+        do: [ { send: "257 \"${cwd}\" is the current directory\r\n" } ]
+      - match: { command: "(?i)^CWD (?P<dir>\\S+)" }
+        do: [ { set: { cwd: "${dir}" } }, { send: "250 Directory successfully changed.\r\n" } ]
+      - match: { command: "(?i)^TYPE " }
+        do: [ { send: "200 Switching mode.\r\n" } ]
+      - match: { command: "(?i)^(PASV|EPSV|PORT|EPRT)" }
+        do: [ { tag: data_channel_attempt }, { send: "425 Can't open data connection.\r\n" } ]
+      - match: { command: "(?i)^(LIST|NLST|RETR|STOR|APPE)" }
+        do: [ { tag: transfer_attempt }, { send: "425 Use PORT or PASV first.\r\n" } ]
+      - match: { command: "(?i)^(QUIT|BYE)" }
+        do: [ { send: "221 Goodbye.\r\n" }, { close: true } ]
+    fallback: { send: "500 Unknown command.\r\n" }

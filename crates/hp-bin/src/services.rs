@@ -20,6 +20,12 @@ pub const SERVICES: &[Service] = &[
         shell_track: Some(include_str!("../../../tracks/ssh-real-shell.yaml")),
     },
     Service {
+        protocol: "ftp",
+        ports: &[21, 2121],
+        track: include_str!("../../../tracks/ftp-vsftpd.yaml"),
+        shell_track: None,
+    },
+    Service {
         protocol: "banner",
         ports: &[23, 2323],
         track: include_str!("../../../tracks/banner-demo.yaml"),
@@ -62,6 +68,7 @@ mod tests {
     fn lookup() {
         assert_eq!(for_port(22).unwrap().protocol, "ssh");
         assert_eq!(for_port(2222).unwrap().protocol, "ssh");
+        assert_eq!(for_port(21).unwrap().protocol, "ftp");
         assert!(for_port(9).is_none());
         assert!(known_ports().contains("22 (ssh)"));
     }

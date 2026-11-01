@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hp-core", "crates/hp-log", "crates/hp-track", "crates/hp-kit", "crates/hp-testkit", "crates/hp-proto-banner", "crates/hp-proto-ssh", "crates/hp-sandbox", "crates/hp-broker", "crates/hp-bin"]
+members = ["crates/hp-core", "crates/hp-log", "crates/hp-track", "crates/hp-kit", "crates/hp-testkit", "crates/hp-proto-banner", "crates/hp-proto-ssh", "crates/hp-proto-ftp", "crates/hp-sandbox", "crates/hp-broker", "crates/hp-bin"]
 
 [workspace.package]
 edition = "2021"
@@ -35,5 +35,6 @@ hp-kit = { path = "crates/hp-kit" }
 hp-testkit = { path = "crates/hp-testkit" }
 hp-proto-banner = { path = "crates/hp-proto-banner" }
 hp-proto-ssh = { path = "crates/hp-proto-ssh" }
+hp-proto-ftp = { path = "crates/hp-proto-ftp" }
 hp-sandbox = { path = "crates/hp-sandbox" }
 hp-broker = { path = "crates/hp-broker" }
