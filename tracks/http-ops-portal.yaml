@@ -1,0 +1,135 @@
+# Track for the `http` plugin (HTTP and HTTPS): the web console of the
+# plc-gw-03 gateway, behind nginx, plus the files a careless admin leaves
+# lying around. Every request is one `request` event; match it with
+# `method`, `path`, `query`, `headers` (lowercased "name: value" lines) and
+# `body`, or `op` ("GET /path?query").
+# - A `send` is the response: either a whole one ("HTTP/1.1 302 Found\n
+#   Location: /\n\nbody") or just a body (served as a 200 HTML page). The
+#   plugin always sets Content-Length, Connection, Date and Server.
+# - Requests carrying credentials (Basic auth, or a login form posted as
+#   urlencoded fields or JSON) also bind `user` and `password`; `auth: true`
+#   marks them as accepted in the log.
+# - With no `send` the answer is an nginx-style 404.
+# Only the first rule that matches a request runs, so each rule that tags
+# also answers.
+name: http-ops-portal
+vars:
+  failed_logins: 0
+start: site
+
+states:
+  site:
+    on:
+      # ---- exploitation attempts: flag, then answer like a hardened server
+      - match: { op: '\$\{jndi:' }
+        do: [ { tag: log4shell_attempt }, { send: "HTTP/1.1 400 Bad Request\n\n" } ]
+      - match: { headers: '\$\{jndi:' }
+        do: [ { tag: log4shell_attempt }, { send: "HTTP/1.1 400 Bad Request\n\n" } ]
+      - match: { body: '\$\{jndi:' }
+        do: [ { tag: log4shell_attempt }, { send: "HTTP/1.1 400 Bad Request\n\n" } ]
+      - match: { headers: '(?m)^[a-z-]+: \(\) \{' }
+        do: [ { tag: shellshock_attempt }, { send: "HTTP/1.1 404 Not Found\n\n" } ]
+      - match: { op: '(?i)(\.\./|\.\.%2f|%2e%2e)' }
+        do: [ { tag: path_traversal }, { send: "HTTP/1.1 400 Bad Request\n\n" } ]
+      - match: { op: '(?i)(;|%3b|\||%7c|`|\$\()(\s|%20|\+)*(wget|curl|sh|bash|nc|busybox)\b' }
+        do: [ { tag: command_injection }, { send: "HTTP/1.1 400 Bad Request\n\n" } ]
+      - match: { body: '(?i)(;|\||`|\$\()\s*(wget|curl|sh|bash|nc|busybox)\b' }
+        do: [ { tag: command_injection }, { send: "HTTP/1.1 400 Bad Request\n\n" } ]
+
+      # ---- secrets and source left in the web root
+      - match: { path: '^/\.env$' }
+        do:
+          - tag: secrets_probe
+          - delay: 50ms..150ms
+          - send: |
+              HTTP/1.1 200 OK
+              Content-Type: application/octet-stream
+
+              APP_ENV=production
+              APP_DEBUG=false
+              DB_HOST=10.20.4.11
+              DB_PORT=5432
+              DB_DATABASE=gwconsole
+              DB_USERNAME=gwconsole
+              DB_PASSWORD=Gw!c0ns0le-2023
+              HISTORIAN_URL=http://10.20.4.30:8086
+              MODBUS_BRIDGE=10.20.8.3:502
+      - match: { path: '^/\.git/(config|HEAD)$' }
+        do:
+          - tag: source_probe
+          - send: |
+              HTTP/1.1 200 OK
+              Content-Type: text/plain
+
+              [core]
+              	repositoryformatversion = 0
+              	filemode = true
+              	bare = false
+              [remote "origin"]
+              	url = git@git.internal:ot/gw-console.git
+              	fetch = +refs/heads/*:refs/remotes/origin/*
+              [branch "main"]
+              	remote = origin
+              	merge = refs/heads/main
+      - match: { path: '(?i)\.(sql|bak|old|swp|zip|tar\.gz|tgz)$' }
+        do: [ { tag: backup_probe }, { send: "HTTP/1.1 403 Forbidden\n\n" } ]
+      - match: { path: '^/(actuator|server-status|phpinfo\.php|info\.php|debug|console)' }
+        do: [ { tag: admin_probe }, { send: "HTTP/1.1 403 Forbidden\n\n" } ]
+      - match: { path: '(?i)^/(wp-login\.php|wp-admin|xmlrpc\.php|phpmyadmin|pma|manager/html|owa|remote/login|dana-na|global-protect|vpn)' }
+        do: [ { tag: product_probe }, { send: "HTTP/1.1 404 Not Found\n\n" } ]
+      - match: { path: '^/robots\.txt$' }
+        do:
+          - send: |
+              HTTP/1.1 200 OK
+              Content-Type: text/plain
+
+              User-agent: *
+              Disallow: /api/
+              Disallow: /backup/
+
+      # ---- the management console
+      - match: { method: '^(GET|HEAD)$', path: '^/(login)?$' }
+        do: [ { send: "HTTP/1.1 200 OK\nContent-Type: text/html; charset=utf-8\nSet-Cookie: GWSESSID=guest; Path=/; HttpOnly\n\n<!DOCTYPE html>\n<html><head><title>plc-gw-03 - Gateway Management</title></head>\n<body><h2>Gateway Management Console</h2>\n<form method=\"post\" action=\"/login\">\n<label>Username <input name=\"username\"></label><br>\n<label>Password <input name=\"password\" type=\"password\"></label><br>\n<button>Sign in</button>\n</form><p><small>Firmware 4.2.1 &middot; plc-gw-03</small></p></body></html>\n" } ]
+      - match: { method: '^POST$', path: '^/(login|api/v1/auth)$', password: '' }
+        when: "failed_logins < 2"
+        do:
+          - tag: login_attempt
+          - set: { failed_logins: "failed_logins + 1" }
+          - delay: 600ms..1200ms
+          - auth: false
+          - send: "HTTP/1.1 200 OK\nContent-Type: text/html; charset=utf-8\n\n<!DOCTYPE html>\n<html><head><title>plc-gw-03 - Gateway Management</title></head>\n<body><h2>Gateway Management Console</h2>\n<p style=\"color:#b00\">Invalid username or password.</p>\n<form method=\"post\" action=\"/login\">\n<label>Username <input name=\"username\"></label><br>\n<label>Password <input name=\"password\" type=\"password\"></label><br>\n<button>Sign in</button>\n</form></body></html>\n"
+      - match: { method: '^POST$', path: '^/(login|api/v1/auth)$', password: '' }
+        do:
+          - tag: auth_success
+          - delay: 400ms
+          - auth: true
+          - send: "HTTP/1.1 302 Found\nLocation: /dashboard\nSet-Cookie: GWSESSID=a81f03c2e4b7d9165c0e; Path=/; HttpOnly\n\n"
+      # Signed in: the session cookie handed out above opens the console,
+      # on any connection (as a real cookie session would).
+      - match: { path: '^/dashboard', headers: '(?m)^cookie:.*GWSESSID=[0-9a-f]{20}' }
+        do:
+          - tag: console_access
+          - send: |
+              <!DOCTYPE html>
+              <html><head><title>plc-gw-03 - Overview</title></head>
+              <body><h2>Overview</h2>
+              <table>
+              <tr><th>Link</th><th>Peer</th><th>State</th></tr>
+              <tr><td>Modbus/TCP</td><td>10.20.8.3:502</td><td>up</td></tr>
+              <tr><td>OPC UA</td><td>opc.tcp://10.20.8.10:4840</td><td>up</td></tr>
+              <tr><td>Historian</td><td>10.20.4.30:8086</td><td>degraded</td></tr>
+              </table>
+              <p><a href="/api/v1/config">Export configuration</a> &middot; <a href="/logout">Sign out</a></p>
+              </body></html>
+      - match: { method: '^(GET|HEAD)$', path: '^/api/v1/(config|users)', headers: '(?m)^cookie:.*GWSESSID=[0-9a-f]{20}' }
+        do:
+          - tag: config_export
+          - delay: 200ms..500ms
+          - send: "HTTP/1.1 200 OK\nContent-Type: application/json\n\n{\"hostname\":\"plc-gw-03\",\"users\":[{\"name\":\"admin\",\"role\":\"admin\"},{\"name\":\"svc_historian\",\"role\":\"service\"}],\"ldap\":{\"server\":\"ldap://10.20.0.5\",\"bind_dn\":\"CN=svc_gw,OU=Service,DC=corp,DC=local\"}}\n"
+      - match: { method: '^(POST|PUT)$', path: '^/api/v1/', headers: '(?m)^cookie:.*GWSESSID=[0-9a-f]{20}' }
+        do: [ { tag: write_attempt }, { delay: 1s..2s }, { send: "HTTP/1.1 500 Internal Server Error\nContent-Type: application/json\n\n{\"error\":\"device busy\"}\n" } ]
+      - match: { path: '^/logout' }
+        do: [ { send: "HTTP/1.1 302 Found\nLocation: /login\nSet-Cookie: GWSESSID=deleted; Path=/; Max-Age=0\n\n" } ]
+      - match: { path: '^/(dashboard|api/)' }
+        do: [ { send: "HTTP/1.1 302 Found\nLocation: /login\n\n" } ]
+    fallback: { send: "" }

@@ -47,6 +47,34 @@ pub enum Record {
     Transition { from: String, to: String },
     /// The behavior hit a runtime error and skipped a step.
     BehaviorError { error: String },
+    /// A TLS ClientHello, logged before the handshake so it survives a
+    /// client that then rejects the certificate. `ja4` is the FoxIO JA4
+    /// client fingerprint; `versions` are the offered TLS versions.
+    TlsClientHello {
+        sni: Option<String>,
+        alpn: Vec<String>,
+        versions: Vec<String>,
+        ja4: String,
+    },
+    /// A TLS listener received something other than a TLS handshake (e.g.
+    /// plain HTTP on 443). The session continues in plaintext.
+    PlaintextOnTls,
+    /// One parsed HTTP request. `body` is the decoded body (after chunked
+    /// transfer decoding); the raw bytes are in the `rx` records.
+    HttpRequest {
+        method: String,
+        target: String,
+        version: String,
+        headers: Vec<Header>,
+        body: Payload,
+    },
+}
+
+/// One HTTP header as received (name case preserved).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Header {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -61,6 +89,10 @@ pub enum AuthMethod {
     None,
     Password,
     PublicKey,
+    /// HTTP `Authorization: Basic`.
+    HttpBasic,
+    /// Credentials posted to a web login form (urlencoded or JSON).
+    HttpForm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -211,6 +243,41 @@ mod tests {
             (
                 Record::BehaviorError { error: "e".into() },
                 json!({"kind": "behavior_error", "error": "e"}),
+            ),
+            (
+                Record::TlsClientHello {
+                    sni: Some("a.example".into()),
+                    alpn: vec!["h2".into()],
+                    versions: vec!["1.3".into()],
+                    ja4: "t13d0101h2_x_y".into(),
+                },
+                json!({"kind": "tls_client_hello", "sni": "a.example", "alpn": ["h2"],
+                       "versions": ["1.3"], "ja4": "t13d0101h2_x_y"}),
+            ),
+            (Record::PlaintextOnTls, json!({"kind": "plaintext_on_tls"})),
+            (
+                Record::HttpRequest {
+                    method: "GET".into(),
+                    target: "/?a".into(),
+                    version: "HTTP/1.1".into(),
+                    headers: vec![Header {
+                        name: "Host".into(),
+                        value: "h".into(),
+                    }],
+                    body: Payload::new(b""),
+                },
+                json!({"kind": "http_request", "method": "GET", "target": "/?a",
+                       "version": "HTTP/1.1", "headers": [{"name": "Host", "value": "h"}],
+                       "body": {"len": 0, "hex": "", "text": ""}}),
+            ),
+            (
+                Record::Auth {
+                    user: "u".into(),
+                    method: AuthMethod::HttpForm,
+                    credential: "p".into(),
+                    accepted: true,
+                },
+                json!({"kind": "auth", "user": "u", "method": "http_form", "credential": "p", "accepted": true}),
             ),
         ];
         for (record, want) in cases {

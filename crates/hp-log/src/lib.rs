@@ -9,7 +9,7 @@ mod session;
 mod sink;
 
 pub use record::{
-    AuthMethod, ChannelRequestKind, CommandSource, Limit, Payload, Record, RejectReason,
+    AuthMethod, ChannelRequestKind, CommandSource, Header, Limit, Payload, Record, RejectReason,
 };
 pub use session::SessionLogger;
 pub use sink::LogSink;

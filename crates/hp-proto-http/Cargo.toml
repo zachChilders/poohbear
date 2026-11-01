@@ -1,0 +1,24 @@
+[package]
+name = "hp-proto-http"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64 = "0.22"
+hp-core.workspace = true
+hp-kit.workspace = true
+hp-log.workspace = true
+httparse = "1"
+httpdate = "1"
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+hp-testkit.workspace = true

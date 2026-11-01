@@ -9,7 +9,17 @@ use hp_core::Event;
 use crate::expr::Value;
 
 /// Names bound from the current event; usable in any expression.
-pub(crate) const EVENT_VARS: &[&str] = &["user", "password", "command", "argv0", "op", "raw"];
+pub(crate) const EVENT_VARS: &[&str] = &[
+    "user", "password", "command", "argv0", "op", "raw", "method", "path", "query", "headers",
+    "body",
+];
+
+/// Fields of a `Request` event's `args` that are bound as variables when they
+/// are strings (see `hp_core::Event::Request`). `user`/`password` are present
+/// only when the request carried credentials.
+const REQUEST_VARS: &[&str] = &[
+    "method", "path", "query", "headers", "body", "user", "password",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EventKind {
@@ -59,8 +69,13 @@ pub(crate) fn bind(ev: &Event) -> (EventKind, HashMap<String, Value>) {
             env.insert("argv0".into(), s(c.split_whitespace().next().unwrap_or("")));
             EventKind::Command
         }
-        Event::Request { op, .. } => {
+        Event::Request { op, args } => {
             env.insert("op".into(), s(op));
+            for name in REQUEST_VARS {
+                if let Some(v) = args.get(*name).and_then(|v| v.as_str()) {
+                    env.insert((*name).into(), s(v));
+                }
+            }
             EventKind::Request
         }
         Event::Raw(b) => {
@@ -92,7 +107,9 @@ mod tests {
             Event::Command("ls -l".into()),
             Event::Request {
                 op: "read".into(),
-                args: serde_json::Value::Null,
+                args: serde_json::json!({
+                    "method": "GET", "path": "/", "query": "", "headers": "", "body": "",
+                }),
             },
             Event::Raw(Bytes::from_static(b"x")),
         ];
@@ -102,6 +119,27 @@ mod tests {
         let mut declared: Vec<String> = EVENT_VARS.iter().map(|s| s.to_string()).collect();
         declared.sort();
         assert_eq!(bound, declared, "EVENT_VARS and bind() have drifted apart");
+    }
+
+    #[test]
+    fn request_args_bind_known_string_fields_only() {
+        let (kind, env) = bind(&Event::Request {
+            op: "POST /login".into(),
+            args: serde_json::json!({
+                "path": "/login", "user": "bob", "password": "pw", "len": 3, "extra": "x",
+            }),
+        });
+        assert_eq!(kind, EventKind::Request);
+        assert_eq!(env["op"], Value::Str("POST /login".into()));
+        assert_eq!(env["path"], Value::Str("/login".into()));
+        assert_eq!(env["password"], Value::Str("pw".into()));
+        assert!(!env.contains_key("len") && !env.contains_key("extra"));
+        // Non-object args bind nothing beyond `op`.
+        let (_, env) = bind(&Event::Request {
+            op: "x".into(),
+            args: serde_json::Value::Null,
+        });
+        assert_eq!(env.len(), 1);
     }
 
     #[test]

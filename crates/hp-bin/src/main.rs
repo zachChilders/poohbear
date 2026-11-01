@@ -35,6 +35,7 @@ fn plugin(cfg: &Config) -> anyhow::Result<Arc<dyn Protocol>> {
     match cfg.protocol.as_str() {
         "banner" => Ok(Arc::new(hp_proto_banner::Banner)),
         "ftp" => Ok(Arc::new(hp_proto_ftp::Ftp)),
+        "http" => Ok(Arc::new(hp_proto_http::Http)),
         "ssh" => {
             let ssh = hp_proto_ssh::Ssh::new(cfg.persona.banner.as_deref())?;
             Ok(Arc::new(match &cfg.shell_broker {
@@ -42,7 +43,7 @@ fn plugin(cfg: &Config) -> anyhow::Result<Arc<dyn Protocol>> {
                 None => ssh,
             }))
         }
-        other => anyhow::bail!("unknown protocol {other:?} (available: banner, ftp, ssh)"),
+        other => anyhow::bail!("unknown protocol {other:?} (available: banner, ftp, http, ssh)"),
     }
 }
 
@@ -65,6 +66,11 @@ async fn main() -> anyhow::Result<()> {
         None => Config::from_env(|k| std::env::var(k).ok())?,
     };
     let proto = plugin(&cfg)?;
+    // Fail closed: a missing or bad certificate means the honeypot does not start.
+    let tls = match &cfg.tls {
+        Some(source) => Some(Arc::new(hp_tls::Acceptor::new(source)?)),
+        None => None,
+    };
 
     // Fail closed: an invalid track means the honeypot does not start.
     let behavior: Arc<dyn BehaviorFactory> = match &cfg.track {
@@ -88,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
         limits: cfg.limits,
         persona: cfg.persona,
         max_sessions: cfg.max_sessions,
+        tls,
     };
     let server = Server::new(proto, behavior, sink, settings);
 
@@ -95,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
         let listener = TcpListener::bind(addr)
             .await
             .with_context(|| format!("binding {addr}"))?;
-        tracing::info!(%addr, protocol = server.protocol_name(), "listening");
+        tracing::info!(%addr, protocol = server.protocol_name(), tls = cfg.tls.is_some(), "listening");
         tokio::spawn(server.clone().serve(listener));
     }
     tokio::signal::ctrl_c().await?;

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
 use hp_core::{Limits, Persona};
+use hp_tls::CertSource;
 use serde::Deserialize;
 
 use crate::services;
@@ -34,6 +35,8 @@ pub struct Config {
     pub session_log: Option<PathBuf>,
     /// Socket of the broker that runs real shells in sandboxes, if enabled.
     pub shell_broker: Option<PathBuf>,
+    /// Serve every listener over TLS with this certificate.
+    pub tls: Option<CertSource>,
 }
 
 impl Config {
@@ -46,6 +49,9 @@ impl Config {
     /// Configuration inferred from the environment alone: `PORT` picks the
     /// protocol and its built-in track; `HONEYPOT_BROKER` (a socket path)
     /// turns on real shells; `HONEYPOT_LOG` sends session records to a file.
+    /// TLS ports use `HONEYPOT_TLS_CERT` + `HONEYPOT_TLS_KEY` (PEM) if set,
+    /// else a self-signed certificate for `HONEYPOT_TLS_NAMES` (comma
+    /// separated; the default is the built-in persona's hostname).
     pub fn from_env(var: impl Fn(&str) -> Option<String>) -> anyhow::Result<Config> {
         let port: u16 = var("PORT")
             .context("set PORT (or pass --config)")?
@@ -72,6 +78,25 @@ impl Config {
             service.protocol
         ))?;
         cfg.track = Some(TrackSource::Builtin(track));
+        cfg.persona.banner = service.banner.map(String::from);
+        if service.tls {
+            cfg.tls = Some(match (var("HONEYPOT_TLS_CERT"), var("HONEYPOT_TLS_KEY")) {
+                (Some(cert), Some(key)) => CertSource::Files {
+                    cert: cert.into(),
+                    key: key.into(),
+                },
+                (None, None) => CertSource::SelfSigned {
+                    names: var("HONEYPOT_TLS_NAMES")
+                        .unwrap_or_else(|| DEFAULT_TLS_NAME.into())
+                        .split(',')
+                        .map(|n| n.trim().to_string())
+                        .filter(|n| !n.is_empty())
+                        .collect(),
+                    organization: None,
+                },
+                _ => bail!("set both HONEYPOT_TLS_CERT and HONEYPOT_TLS_KEY, or neither"),
+            });
+        }
         cfg.shell_broker = shell_broker;
         cfg.session_log = var("HONEYPOT_LOG").map(PathBuf::from);
         Ok(cfg)
@@ -102,9 +127,13 @@ impl Config {
             max_sessions: raw.limits.max_sessions,
             session_log: raw.logging.json,
             shell_broker: raw.shell.map(|s| s.broker),
+            tls: raw.tls.map(RawTls::into_source).transpose()?,
         })
     }
 }
+
+/// Self-signed certificate name when nothing else is given.
+const DEFAULT_TLS_NAME: &str = "plc-gw-03";
 
 // ---- on-disk shape (private: only `Config::parse` sees it) ----
 
@@ -121,6 +150,37 @@ struct RawConfig {
     #[serde(default)]
     logging: RawLogging,
     shell: Option<RawShell>,
+    tls: Option<RawTls>,
+}
+
+/// Either `cert` + `key`, or `self_signed`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTls {
+    cert: Option<PathBuf>,
+    key: Option<PathBuf>,
+    self_signed: Option<RawSelfSigned>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSelfSigned {
+    names: Vec<String>,
+    organization: Option<String>,
+}
+
+impl RawTls {
+    fn into_source(self) -> anyhow::Result<CertSource> {
+        match (self.cert, self.key, self.self_signed) {
+            (Some(cert), Some(key), None) => Ok(CertSource::Files { cert, key }),
+            (None, None, Some(s)) if !s.names.is_empty() => Ok(CertSource::SelfSigned {
+                names: s.names,
+                organization: s.organization,
+            }),
+            (None, None, Some(_)) => bail!("tls.self_signed.names must not be empty"),
+            _ => bail!("tls needs either `cert` and `key`, or `self_signed`"),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -212,6 +272,7 @@ mod tests {
         assert_eq!(c.limits.session_timeout, Duration::from_secs(900));
         assert_eq!(c.limits.max_input_bytes, 1 << 20);
         assert!(c.track.is_none() && c.session_log.is_none() && c.shell_broker.is_none());
+        assert!(c.tls.is_none());
     }
 
     #[test]
@@ -232,6 +293,73 @@ mod tests {
         assert_eq!(c.limits.session_timeout, Duration::from_secs(30));
         assert_eq!(c.limits.max_input_bytes, 2048);
         assert_eq!(c.session_log.as_deref(), Some(Path::new("/tmp/x.jsonl")));
+    }
+
+    #[test]
+    fn tls_takes_files_or_a_self_signed_spec() {
+        let c = Config::parse(&format!("{MIN}tls: {{ cert: c.pem, key: k.pem }}")).unwrap();
+        assert_eq!(
+            c.tls,
+            Some(CertSource::Files {
+                cert: "c.pem".into(),
+                key: "k.pem".into()
+            })
+        );
+        let c = Config::parse(&format!(
+            "{MIN}tls: {{ self_signed: {{ names: [portal.corp, 10.0.0.5], organization: Corp }} }}"
+        ))
+        .unwrap();
+        assert_eq!(
+            c.tls,
+            Some(CertSource::SelfSigned {
+                names: vec!["portal.corp".into(), "10.0.0.5".into()],
+                organization: Some("Corp".into())
+            })
+        );
+        let err =
+            |extra: &str| format!("{:#}", Config::parse(&format!("{MIN}{extra}")).unwrap_err());
+        assert!(err("tls: { cert: c.pem }").contains("either"));
+        assert!(err("tls: { cert: c, key: k, self_signed: { names: [a] } }").contains("either"));
+        assert!(err("tls: { self_signed: { names: [] } }").contains("names"));
+        assert!(err("tls: { pfx: x }").contains("pfx"));
+    }
+
+    #[test]
+    fn tls_ports_get_tls_from_the_environment() {
+        let c = Config::from_env(env(&[("PORT", "443")])).unwrap();
+        assert_eq!(c.protocol, "http");
+        assert_eq!(c.persona.banner.as_deref(), Some("nginx/1.18.0 (Ubuntu)"));
+        assert_eq!(
+            c.tls,
+            Some(CertSource::SelfSigned {
+                names: vec!["plc-gw-03".into()],
+                organization: None
+            })
+        );
+        let c = Config::from_env(env(&[
+            ("PORT", "8443"),
+            ("HONEYPOT_TLS_NAMES", "a.corp, b"),
+        ]))
+        .unwrap();
+        assert!(
+            matches!(c.tls, Some(CertSource::SelfSigned { names, .. }) if names == ["a.corp", "b"])
+        );
+        let c = Config::from_env(env(&[
+            ("PORT", "443"),
+            ("HONEYPOT_TLS_CERT", "/c"),
+            ("HONEYPOT_TLS_KEY", "/k"),
+        ]))
+        .unwrap();
+        assert!(matches!(c.tls, Some(CertSource::Files { .. })));
+        let err = format!(
+            "{:#}",
+            Config::from_env(env(&[("PORT", "443"), ("HONEYPOT_TLS_CERT", "/c")])).unwrap_err()
+        );
+        assert!(err.contains("both"), "{err}");
+        assert!(Config::from_env(env(&[("PORT", "80")]))
+            .unwrap()
+            .tls
+            .is_none());
     }
 
     fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {

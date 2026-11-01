@@ -256,6 +256,62 @@ states:
 }
 
 #[test]
+fn request_fields_match_and_user_alone_still_means_an_auth_attempt() {
+    let track = Track::from_yaml(
+        r#"
+name: req
+start: a
+states:
+  a:
+    on:
+      - match: { method: '^POST$', path: '^/login$', password: '.' }
+        do: [ { send: 'login ${user}' } ]
+      - match: { headers: '(?m)^user-agent: sqlmap' }
+        do: [ { tag: scanner }, { send: 'scanner' } ]
+      - match: { path: '^/(?P<f>[^/]+)$', query: 'x=1' }
+        do: [ { send: 'file ${f}' } ]
+      - match: { body: 'jndi' }
+        do: [ { send: 'body' } ]
+      - match: { user: 'root' }
+        do: [ { send: 'ssh-style' } ]
+    fallback: { send: 'none' }
+"#,
+    )
+    .unwrap();
+    let mut s = Session::new(Arc::new(track), 1);
+    let req = |args: serde_json::Value| Event::Request {
+        op: "x".into(),
+        args,
+    };
+    use serde_json::json;
+    let o = s.step(&req(json!({
+        "method": "POST", "path": "/login", "user": "bob", "password": "pw"
+    })));
+    assert_eq!(sent(&o), "login bob");
+    // Same request without credentials: the password field is unbound.
+    let o = s.step(&req(json!({ "method": "POST", "path": "/login" })));
+    assert_eq!(sent(&o), "none");
+    let o = s.step(&req(
+        json!({ "headers": "host: a\nuser-agent: sqlmap/1.7\n" }),
+    ));
+    assert_eq!(
+        (sent(&o).as_str(), o.tags.as_slice()),
+        ("scanner", &["scanner".to_string()][..])
+    );
+    assert_eq!(
+        sent(&s.step(&req(json!({ "path": "/a.txt", "query": "x=1" })))),
+        "file a.txt"
+    );
+    assert_eq!(
+        sent(&s.step(&req(json!({ "body": "${jndi:ldap://x}" })))),
+        "body"
+    );
+    // `user:` alone binds to auth attempts, not to requests carrying a user.
+    assert_eq!(sent(&s.step(&req(json!({ "user": "root" })))), "none");
+    assert_eq!(sent(&s.step(&login("root"))), "ssh-style");
+}
+
+#[test]
 fn every_shipped_track_is_valid() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tracks");
     let mut loaded = 0;
