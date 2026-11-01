@@ -40,6 +40,10 @@ pub enum Event {
     Connected,
     AuthAttempt { user: String, secret: Secret },
     Command(String),
+    /// A request in a request/response protocol. `op` names it (HTTP:
+    /// `"GET /path?q"`). Tracks see these string fields of `args` as
+    /// variables: `method`, `path`, `query`, `headers`, `body`, and `user` /
+    /// `password` when the request carried credentials.
     Request { op: String, args: serde_json::Value },
     Raw(Bytes),
     Disconnected,

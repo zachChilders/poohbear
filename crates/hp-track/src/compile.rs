@@ -173,24 +173,46 @@ impl Compiler {
     fn matcher(&mut self, loc: &str, m: RawMatch) -> (Matcher, HashSet<String>) {
         let mut fields = Vec::new();
         let mut captures = HashSet::new();
-        let mut kinds: Vec<EventKind> = Vec::new();
+        // The event kinds this rule can match: narrowed by `event` and by
+        // every field (each field exists only on some kinds of event).
+        let mut kinds: Option<Vec<EventKind>> = None;
         if let Some(e) = &m.event {
             match EventKind::parse(e) {
-                Some(k) => kinds.push(k),
+                Some(k) => kinds = Some(vec![k]),
                 None => self.errs.push(format!("{loc}: unknown event `{e}`")),
             }
         }
-        let specs = [
-            ("command", m.command, EventKind::Command),
-            ("user", m.user, EventKind::AuthAttempt),
-            ("password", m.password, EventKind::AuthAttempt),
-            ("op", m.op, EventKind::Request),
-            ("raw", m.raw, EventKind::Raw),
+        use EventKind::{AuthAttempt, Command, Raw, Request};
+        // The first kind listed is the one a field implies on its own, so
+        // `user:` alone still means an auth attempt.
+        let specs: [(&'static str, Option<String>, &[EventKind]); 10] = [
+            ("command", m.command, &[Command]),
+            ("user", m.user, &[AuthAttempt, Request]),
+            ("password", m.password, &[AuthAttempt, Request]),
+            ("op", m.op, &[Request]),
+            ("method", m.method, &[Request]),
+            ("path", m.path, &[Request]),
+            ("query", m.query, &[Request]),
+            ("headers", m.headers, &[Request]),
+            ("body", m.body, &[Request]),
+            ("raw", m.raw, &[Raw]),
         ];
-        for (field, pat, implied) in specs {
+        let mut conflict = false;
+        for (field, pat, allowed) in specs {
             let Some(pat) = pat else { continue };
-            if !kinds.contains(&implied) {
-                kinds.push(implied);
+            let narrowed: Vec<EventKind> = match &kinds {
+                None => allowed.to_vec(),
+                Some(k) => k.iter().copied().filter(|k| allowed.contains(k)).collect(),
+            };
+            if narrowed.is_empty() && !conflict {
+                conflict = true;
+                self.errs.push(format!(
+                    "{loc}: match fields conflict (`{field}` cannot apply to {:?})",
+                    kinds.as_deref().unwrap_or_default()
+                ));
+            }
+            if !narrowed.is_empty() {
+                kinds = Some(narrowed);
             }
             match Regex::new(&pat) {
                 Ok(re) => {
@@ -202,14 +224,9 @@ impl Compiler {
                     .push(format!("{loc}: bad regex for `{field}`: {e}")),
             }
         }
-        if kinds.len() > 1 {
-            self.errs.push(format!(
-                "{loc}: match fields conflict (event kinds {kinds:?})"
-            ));
-        }
         (
             Matcher {
-                event: kinds.first().copied(),
+                event: kinds.and_then(|k| k.first().copied()),
                 fields,
             },
             captures,
@@ -430,6 +447,8 @@ states:
             ("name: t\nstart: a\nstates: {a: {fallback: {delay: 'soon'}}}", "delay"),
             ("name: t\nstart: a\nstates: {a: {on: [{match: {event: wat}}], fallback: {send: x}}}", "unknown event"),
             ("name: t\nstart: a\nstates: {a: {on: [{match: {command: x, user: y}}], fallback: {send: x}}}", "conflict"),
+            ("name: t\nstart: a\nstates: {a: {on: [{match: {event: connected, path: x}}], fallback: {send: x}}}", "`path` cannot apply"),
+            ("name: t\nstart: a\nstates: {a: {on: [{match: {body: '('}}], fallback: {send: x}}}", "bad regex for `body`"),
             ("name: t\nstart: a\nstates: {a: {on: [{when: 'len(1,2)'}], fallback: {send: x}}}", "argument"),
             ("name: t\nstart: a\nbogus: 1\nstates: {a: {fallback: {send: x}}}", "bogus"),
             ("name: t\nvars: {v: [1]}\nstart: a\nstates: {a: {fallback: {send: x}}}", "var `v`"),

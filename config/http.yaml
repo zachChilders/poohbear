@@ -1,0 +1,16 @@
+# HTTP honeypot: the plc-gw-03 web console behind nginx. Port 8080 so it runs
+# unprivileged; use a port forward (or CAP_NET_BIND_SERVICE) to expose it as 80.
+protocol: http
+listen:
+  - 127.0.0.1:8080
+persona:
+  hostname: plc-gw-03
+  # The `Server` header and the footer of error pages.
+  banner: "nginx/1.18.0 (Ubuntu)"
+track: tracks/http-ops-portal.yaml
+limits:
+  max_sessions: 256
+  session_timeout: 2m
+  max_input_bytes: 1MiB
+logging:
+  json: /tmp/http-sessions.jsonl
