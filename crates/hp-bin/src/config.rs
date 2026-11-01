@@ -22,6 +22,8 @@ pub struct Config {
     pub max_sessions: usize,
     /// JSONL session log path; stdout if unset.
     pub session_log: Option<PathBuf>,
+    /// Socket of the broker that runs real shells in sandboxes, if enabled.
+    pub shell_broker: Option<PathBuf>,
 }
 
 impl Config {
@@ -55,6 +57,7 @@ impl Config {
             },
             max_sessions: raw.limits.max_sessions,
             session_log: raw.logging.json,
+            shell_broker: raw.shell.map(|s| s.broker),
         })
     }
 }
@@ -73,6 +76,13 @@ struct RawConfig {
     limits: RawLimits,
     #[serde(default)]
     logging: RawLogging,
+    shell: Option<RawShell>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawShell {
+    broker: PathBuf,
 }
 
 #[derive(Default, Deserialize)]
@@ -157,7 +167,7 @@ mod tests {
         assert_eq!(c.max_sessions, 256);
         assert_eq!(c.limits.session_timeout, Duration::from_secs(900));
         assert_eq!(c.limits.max_input_bytes, 1 << 20);
-        assert!(c.track.is_none() && c.session_log.is_none());
+        assert!(c.track.is_none() && c.session_log.is_none() && c.shell_broker.is_none());
     }
 
     #[test]
@@ -165,9 +175,10 @@ mod tests {
         let c = Config::parse(&format!(
             "{MIN}persona: {{ hostname: h, banner: b }}\ntrack: t.yaml\n\
              limits: {{ max_sessions: 3, session_timeout: 30s, max_input_bytes: 2KiB }}\n\
-             logging: {{ json: /tmp/x.jsonl }}"
+             logging: {{ json: /tmp/x.jsonl }}\nshell: {{ broker: /run/hp.sock }}"
         ))
         .unwrap();
+        assert_eq!(c.shell_broker.as_deref(), Some(Path::new("/run/hp.sock")));
         assert_eq!(
             (c.persona.hostname.as_deref(), c.persona.banner.as_deref()),
             (Some("h"), Some("b"))
@@ -188,6 +199,7 @@ mod tests {
         assert!(err("limits: { max_input_bytes: 1XB }").contains("max_input_bytes"));
         assert!(err("bogus: 1").contains("bogus"));
         assert!(err("logging: { pcap: x }").contains("pcap"));
+        assert!(err("shell: {}").contains("broker"));
         assert!(Config::parse("protocol: banner\nlisten: []").is_err());
         assert!(Config::load(Path::new("/nonexistent/x.yaml")).is_err());
     }

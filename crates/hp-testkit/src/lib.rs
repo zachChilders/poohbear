@@ -186,15 +186,28 @@ impl ShellBackend for FakeBackend {
         anyhow::ensure!(!self.fail, "no sandbox available");
         let command = request.command.clone();
         self.requests.lock().unwrap().push(request);
-        let (honeypot_side, mut shell) = tokio::io::duplex(8192);
-        let (responder, live) = (self.responder, self.live.clone());
-        live.fetch_add(1, Ordering::SeqCst);
-        tokio::spawn(async move {
-            run_fake_shell(&mut shell, responder, command).await;
-            live.fetch_sub(1, Ordering::SeqCst);
-        });
-        Ok(Box::new(honeypot_side))
+        Ok(Box::new(spawn_fake_shell(
+            self.responder,
+            command,
+            self.live.clone(),
+        )))
     }
+}
+
+/// Start the scripted shell behind [`FakeBackend`] and return the peer's end of
+/// its stream. `live` counts shells that have not ended or been dropped.
+pub fn spawn_fake_shell(
+    responder: fn(&str) -> Option<String>,
+    command: Option<String>,
+    live: Arc<AtomicUsize>,
+) -> DuplexStream {
+    let (peer, mut shell) = tokio::io::duplex(8192);
+    live.fetch_add(1, Ordering::SeqCst);
+    tokio::spawn(async move {
+        run_fake_shell(&mut shell, responder, command).await;
+        live.fetch_sub(1, Ordering::SeqCst);
+    });
+    peer
 }
 
 async fn run_fake_shell(
