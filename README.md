@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/poohbear.jpg" alt="Poohbear" width="300">
+</p>
+
 # Poohbear
 
 Poohbear is a honeypot: a fake server that looks like a real, slightly neglected machine on your network. Nothing legitimate should ever talk to it, so anyone who does is worth noticing. It lets attackers (and automated scanners) in, plays along, and writes down everything they do.
