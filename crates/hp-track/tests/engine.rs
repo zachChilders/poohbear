@@ -90,6 +90,35 @@ fn fetch_is_tagged_and_faked() {
 }
 
 #[test]
+fn open_shell_is_emitted_with_the_auth_verdict() {
+    let t = Track::from_yaml(
+        "
+name: t
+start: a
+states:
+  a:
+    on:
+      - match: { event: auth_attempt }
+        do: [ { auth: true }, { open_shell: true } ]
+      - match: { command: x }
+        do: [ { open_shell: false } ]
+    fallback: { close: true }
+",
+    )
+    .unwrap();
+    let mut s = Session::new(Arc::new(t), 0);
+    let o = s.step(&login("root"));
+    assert!(matches!(
+        o.actions[..],
+        [Action::AuthResult(true), Action::OpenShell]
+    ));
+    assert!(
+        s.step(&cmd("x")).actions.is_empty(),
+        "open_shell: false is a no-op"
+    );
+}
+
+#[test]
 fn fallback_and_close() {
     let mut s = session(1);
     for _ in 0..4 {
@@ -224,4 +253,18 @@ states:
     assert_eq!(s.vars()["greeted"], Value::Int(1));
     assert_eq!(s.step(&Event::Disconnected).tags, ["left"]);
     assert_eq!(sent(&s.step(&cmd("x"))), "fb");
+}
+
+#[test]
+fn every_shipped_track_is_valid() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tracks");
+    let mut loaded = 0;
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "yaml") {
+            Track::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            loaded += 1;
+        }
+    }
+    assert!(loaded >= 2, "found {loaded} tracks");
 }

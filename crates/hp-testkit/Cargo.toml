@@ -9,6 +9,8 @@ publish = false
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
 bytes.workspace = true
 hp-core.workspace = true
 hp-log.workspace = true
