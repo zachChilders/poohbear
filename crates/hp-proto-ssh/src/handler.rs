@@ -9,14 +9,17 @@
 //!   (the behavior never sees them, and a key is never accepted)
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use hp_core::{Event, Secret};
+use hp_core::{Event, Secret, ShellBackend, ShellRequest, Terminal};
 use hp_kit::term::{sanitize, to_crlf, Edit, LineEditor};
 use hp_kit::{apply, Driver, Flow, Output};
 use hp_log::{AuthMethod, ChannelRequestKind, CommandSource, Record};
 use russh::keys::HashAlg;
 use russh::server::{Auth, Handler, Msg, Session};
 use russh::{Channel, ChannelId, Disconnect, MethodKind, MethodSet};
+
+use crate::real::RealShell;
 
 /// Concurrent session channels per connection; real sshd defaults to 10.
 const MAX_CHANNELS: usize = 8;
@@ -37,13 +40,26 @@ pub(crate) struct Conn {
     /// The behavior's prompt, if it set one; otherwise `user@host:~$ `.
     prompt: Option<String>,
     channels: HashMap<ChannelId, Chan>,
+    session_id: String,
+    /// Where real shells run, if configured.
+    backend: Option<Arc<dyn ShellBackend>>,
+    /// The behavior granted this session a real shell.
+    real_shell: bool,
 }
 
 #[derive(Default)]
 struct Chan {
-    pty: bool,
+    /// Present if the peer asked for a pty.
+    terminal: Option<Terminal>,
     /// Present once a shell was started on this channel.
-    shell: Option<LineEditor>,
+    shell: Option<Shell>,
+}
+
+enum Shell {
+    /// Lines are given to the behavior as commands.
+    Scripted(LineEditor),
+    /// Bytes go to a sandbox.
+    Real(RealShell),
 }
 
 /// The authentication methods we advertise.
@@ -81,8 +97,17 @@ impl Output for ChannelOut<'_> {
 }
 
 impl Conn {
-    pub(crate) fn new(driver: Driver, hostname: Option<&str>, auth_banner: Option<String>) -> Conn {
+    pub(crate) fn new(
+        driver: Driver,
+        session_id: String,
+        hostname: Option<&str>,
+        auth_banner: Option<String>,
+        backend: Option<Arc<dyn ShellBackend>>,
+    ) -> Conn {
         Conn {
+            session_id,
+            backend,
+            real_shell: false,
             driver,
             host: sanitize(hostname.unwrap_or("localhost"), MAX_NAME),
             auth_banner,
@@ -118,6 +143,51 @@ impl Conn {
         session.exit_status_request(channel, 0)?;
         session.eof(channel)?;
         session.close(channel)
+    }
+
+    /// Start a real shell (or, with `command`, a one-shot command) for
+    /// `channel`. On failure the request is refused and the reason logged.
+    async fn open_real(
+        &mut self,
+        session: &mut Session,
+        channel: ChannelId,
+        command: Option<String>,
+    ) -> Result<(), russh::Error> {
+        let log = self.driver.log().clone();
+        let terminal = self.channels.get(&channel).and_then(|c| c.terminal.clone());
+        let request = ShellRequest {
+            session_id: self.session_id.clone(),
+            user: self.user.clone().unwrap_or_default(),
+            command,
+            terminal,
+        };
+        let started = match &self.backend {
+            Some(backend) => {
+                RealShell::start(
+                    backend.as_ref(),
+                    request,
+                    session.handle(),
+                    channel,
+                    log.clone(),
+                )
+                .await
+            }
+            None => Err(anyhow::anyhow!("no shell backend is configured")),
+        };
+        match started {
+            Ok(shell) => {
+                if let Some(chan) = self.channels.get_mut(&channel) {
+                    chan.shell = Some(Shell::Real(shell));
+                }
+                Ok(())
+            }
+            Err(e) => {
+                log.event(Record::Error {
+                    error: format!("{e:#}"),
+                });
+                session.channel_failure(channel)
+            }
+        }
     }
 
     /// Run a command line through the behavior and carry out the reply.
@@ -179,6 +249,7 @@ impl Handler for Conn {
         }
         // The name goes into the prompt, so strip terminal control bytes.
         self.user = Some(sanitize(user, MAX_NAME));
+        self.real_shell = verdict.real_shell;
         self.welcome = verdict.welcome;
         self.prompt = verdict.prompt.map(|p| sanitize(&p, 256));
         Ok(Auth::Accept)
@@ -244,9 +315,9 @@ impl Handler for Conn {
     async fn pty_request(
         &mut self,
         channel: ChannelId,
-        _term: &str,
-        _col_width: u32,
-        _row_height: u32,
+        term: &str,
+        col_width: u32,
+        row_height: u32,
         _pix_width: u32,
         _pix_height: u32,
         _modes: &[(russh::Pty, u32)],
@@ -257,7 +328,11 @@ impl Handler for Conn {
         });
         match self.channels.get_mut(&channel) {
             Some(chan) => {
-                chan.pty = true;
+                chan.terminal = Some(Terminal {
+                    term: sanitize(term, MAX_NAME),
+                    cols: u16::try_from(col_width).unwrap_or(u16::MAX),
+                    rows: u16::try_from(row_height).unwrap_or(u16::MAX),
+                });
                 session.channel_success(channel)
             }
             None => session.channel_failure(channel),
@@ -279,8 +354,11 @@ impl Handler for Conn {
         else {
             return session.channel_failure(channel);
         };
-        let pty = chan.pty;
-        chan.shell = Some(LineEditor::new(pty));
+        if self.real_shell {
+            return self.open_real(session, channel, None).await;
+        }
+        let pty = chan.terminal.is_some();
+        chan.shell = Some(Shell::Scripted(LineEditor::new(pty)));
         session.channel_success(channel)?;
 
         let welcome = std::mem::take(&mut self.welcome);
@@ -307,12 +385,15 @@ impl Handler for Conn {
         if !self.channels.contains_key(&channel) {
             return session.channel_failure(channel);
         }
-        session.channel_success(channel)?;
         let command = String::from_utf8_lossy(data).into_owned();
         self.driver.log().event(Record::Command {
             command: command.clone(),
             via: CommandSource::Exec,
         });
+        if self.real_shell {
+            return self.open_real(session, channel, Some(command)).await;
+        }
+        session.channel_success(channel)?;
         match self.command(session, channel, command, false).await? {
             Flow::Continue => self.finish(session, channel),
             Flow::Close => self.hangup(session),
@@ -343,9 +424,14 @@ impl Handler for Conn {
         let Some(chan) = self.channels.get_mut(&channel) else {
             return Ok(());
         };
-        let pty = chan.pty;
-        let Some(editor) = chan.shell.as_mut() else {
-            return Ok(());
+        let pty = chan.terminal.is_some();
+        let editor = match chan.shell.as_mut() {
+            None => return Ok(()),
+            Some(Shell::Real(shell)) => {
+                shell.send(data).await;
+                return Ok(());
+            }
+            Some(Shell::Scripted(editor)) => editor,
         };
 
         for edit in editor.feed(data) {
@@ -383,12 +469,15 @@ impl Handler for Conn {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if self
+        match self
             .channels
-            .get(&channel)
-            .is_some_and(|c| c.shell.is_some())
+            .get_mut(&channel)
+            .and_then(|c| c.shell.as_mut())
         {
-            self.finish(session, channel)?;
+            // the sandbox's shell sees end of file and ends the channel itself
+            Some(Shell::Real(shell)) => shell.end_input().await,
+            Some(Shell::Scripted(_)) => self.finish(session, channel)?,
+            None => {}
         }
         Ok(())
     }

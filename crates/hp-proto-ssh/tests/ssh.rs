@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use hp_core::{Action, Event, Protocol};
 use hp_proto_ssh::Ssh;
-use hp_testkit::{conformance, of_kind, send, session, CtxOptions, Observer, Script};
+use hp_testkit::{conformance, of_kind, send, session, CtxOptions, FakeBackend, Observer, Script};
 use russh::client;
 use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg};
 use russh::{Channel, ChannelMsg};
@@ -70,6 +70,7 @@ struct Opts {
     script: Script,
     hostname: Option<&'static str>,
     max_input_bytes: u64,
+    backend: Option<Arc<FakeBackend>>,
 }
 
 impl Default for Opts {
@@ -78,6 +79,7 @@ impl Default for Opts {
             script,
             hostname: Some("plc-gw-03"),
             max_input_bytes: 1 << 20,
+            backend: None,
         }
     }
 }
@@ -94,7 +96,10 @@ async fn try_start(opts: Opts) -> Result<Harness, russh::Error> {
         ..CtxOptions::default()
     });
     let (server_io, client_io) = tokio::io::duplex(1 << 16);
-    let ssh = Ssh::new(Some("SSH-2.0-OpenSSH_8.9p1 Test")).unwrap();
+    let mut ssh = Ssh::new(Some("SSH-2.0-OpenSSH_8.9p1 Test")).unwrap();
+    if let Some(backend) = opts.backend {
+        ssh = ssh.with_shell_backend(backend);
+    }
     let server = tokio::spawn(async move { ssh.handle(Box::new(server_io), ctx).await });
 
     let banner = Arc::new(Mutex::new(String::new()));
@@ -615,4 +620,206 @@ async fn exec_ignores_prompts() {
         ("out\n", Some(0)),
         "no prompt without a shell"
     );
+}
+
+// ------------------------------------------------------------ real shells
+
+/// A behavior that lets everyone in and hands them a real shell.
+fn grants_a_real_shell(e: &Event) -> Vec<Action> {
+    match e {
+        Event::AuthAttempt { .. } => vec![Action::AuthResult(true), Action::OpenShell],
+        _ => vec![],
+    }
+}
+
+fn real_shell_opts(backend: &Arc<FakeBackend>) -> Opts {
+    Opts {
+        script: grants_a_real_shell,
+        backend: Some(backend.clone()),
+        ..Opts::default()
+    }
+}
+
+fn echoing_backend() -> Arc<FakeBackend> {
+    FakeBackend::new(|l| (l != "exit").then(|| format!("ran {l}\n")))
+}
+
+#[tokio::test]
+async fn a_real_shell_is_bridged_both_ways_and_every_byte_is_logged() {
+    let backend = echoing_backend();
+    let mut h = start(real_shell_opts(&backend)).await;
+    h.login().await;
+    let mut ch = h.client.channel_open_session().await.unwrap();
+    ch.request_pty(true, "xterm", 100, 30, 0, 0, &[])
+        .await
+        .unwrap();
+    ch.request_shell(true).await.unwrap();
+
+    // the shell's own prompt, with nothing added by the plugin
+    assert_eq!(read_until(&mut ch, "$ ").await, "fake$ ");
+    ch.data_bytes(&b"whoami\r"[..]).await.unwrap();
+    assert_eq!(read_until(&mut ch, "$ ").await, "ran whoami\nfake$ ");
+    ch.data_bytes(&b"exit\r"[..]).await.unwrap();
+    let (_, status) = read_to_close(&mut ch).await;
+    assert_eq!(status, Some(0));
+
+    let requests = backend.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        (requests[0].user.as_str(), requests[0].command.as_deref()),
+        ("root", None)
+    );
+    let t = requests[0].terminal.as_ref().unwrap();
+    assert_eq!((t.term.as_str(), t.cols, t.rows), ("xterm", 100, 30));
+
+    let (records, seen) = h.finish().await;
+    let sent: String = of_kind(&records, "rx")
+        .iter()
+        .map(|r| r["text"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(sent, "whoami.exit.", "keystrokes are captured");
+    assert!(
+        of_kind(&records, "tx")
+            .iter()
+            .any(|r| r["text"] == "ran whoami.fake$ "),
+        "so is the shell's output"
+    );
+    assert!(
+        of_kind(&records, "command").is_empty(),
+        "the behavior is not asked about commands"
+    );
+    assert_eq!(seen, ["Connected", "auth:root", "Disconnected"]);
+}
+
+#[tokio::test]
+async fn a_real_one_shot_command_runs_in_the_sandbox() {
+    let backend = FakeBackend::new(|c| Some(format!("ran {c}\n")));
+    let mut h = start(real_shell_opts(&backend)).await;
+    h.login().await;
+    let mut ch = h.client.channel_open_session().await.unwrap();
+    ch.exec(true, "id -u").await.unwrap();
+    assert_eq!(
+        read_to_close(&mut ch).await,
+        ("ran id -u\n".to_string(), Some(0))
+    );
+    let requests = backend.requests();
+    assert_eq!(
+        (
+            requests[0].command.as_deref(),
+            requests[0].terminal.is_none()
+        ),
+        (Some("id -u"), true)
+    );
+    let (records, _) = h.finish().await;
+    let cmds = of_kind(&records, "command");
+    assert_eq!(
+        (cmds[0]["command"].as_str(), cmds[0]["via"].as_str()),
+        (Some("id -u"), Some("exec"))
+    );
+}
+
+#[tokio::test]
+async fn closing_the_clients_input_ends_the_shell() {
+    let backend = echoing_backend();
+    let mut h = start(real_shell_opts(&backend)).await;
+    h.login().await;
+    let mut ch = h.client.channel_open_session().await.unwrap();
+    ch.request_shell(true).await.unwrap();
+    ch.data_bytes(&b"hostname\n"[..]).await.unwrap();
+    ch.eof().await.unwrap();
+    let (out, status) = read_to_close(&mut ch).await;
+    assert_eq!(
+        (out.as_str(), status),
+        ("fake$ ran hostname\nfake$ ", Some(0))
+    );
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn the_sandbox_is_released_when_the_connection_ends() {
+    let backend = echoing_backend();
+    let mut h = start(real_shell_opts(&backend)).await;
+    h.login().await;
+    let mut ch = h.client.channel_open_session().await.unwrap();
+    ch.request_shell(true).await.unwrap();
+    read_until(&mut ch, "$ ").await;
+    assert_eq!(backend.live(), 1);
+    h.finish().await;
+    for _ in 0..100 {
+        if backend.live() == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the sandbox outlived its session");
+}
+
+#[tokio::test]
+async fn input_to_a_real_shell_counts_against_the_cap() {
+    let backend = echoing_backend();
+    let mut h = start(Opts {
+        max_input_bytes: 16,
+        ..real_shell_opts(&backend)
+    })
+    .await;
+    h.login().await;
+    let mut ch = h.client.channel_open_session().await.unwrap();
+    ch.request_shell(true).await.unwrap();
+    read_until(&mut ch, "$ ").await;
+    ch.data_bytes(vec![b'A'; 200]).await.unwrap();
+    tokio::time::timeout(WAIT, h.server)
+        .await
+        .expect("session is cut")
+        .unwrap()
+        .unwrap();
+    let records = h.obs.records();
+    conformance::input_cap_enforced(&records, 16);
+}
+
+#[tokio::test]
+async fn without_a_backend_a_real_shell_is_refused_and_logged() {
+    let mut h = start(Opts {
+        script: grants_a_real_shell,
+        ..Opts::default()
+    })
+    .await;
+    h.login().await;
+    let mut ch = h.client.channel_open_session().await.unwrap();
+    ch.request_shell(true).await.unwrap();
+    assert!(refused(&mut ch).await);
+    let (records, _) = h.finish().await;
+    assert!(of_kind(&records, "error")[0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("no shell backend"));
+}
+
+#[tokio::test]
+async fn a_backend_that_cannot_start_a_sandbox_refuses_the_request() {
+    let backend = FakeBackend::failing();
+    let mut h = start(real_shell_opts(&backend)).await;
+    h.login().await;
+    let mut ch = h.client.channel_open_session().await.unwrap();
+    ch.exec(true, "id").await.unwrap();
+    assert!(refused(&mut ch).await);
+    let (records, _) = h.finish().await;
+    assert!(of_kind(&records, "error")[0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("no sandbox available"));
+}
+
+/// Wait for the server to refuse a channel request.
+async fn refused(ch: &mut Channel<client::Msg>) -> bool {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            match ch.wait().await {
+                Some(ChannelMsg::Failure) => return true,
+                Some(ChannelMsg::Success) | None => return false,
+                Some(_) => {}
+            }
+        }
+    })
+    .await
+    .unwrap()
 }

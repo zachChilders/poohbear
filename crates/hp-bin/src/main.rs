@@ -1,6 +1,7 @@
 mod behavior;
 mod config;
 mod server;
+mod services;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,29 +9,38 @@ use std::sync::Arc;
 use anyhow::Context;
 use behavior::TrackFactory;
 use clap::Parser;
-use config::Config;
+use config::{Config, TrackSource};
 use hp_core::{BehaviorFactory, Passive, Protocol};
 use hp_log::LogSink;
+use hp_sandbox::ContainerBackend;
 use server::{Server, Settings};
 use tokio::net::TcpListener;
 
 #[derive(Parser)]
 #[command(about = "Single-protocol honeypot")]
 struct Cli {
-    /// Path to config YAML
+    /// Path to config YAML. Without it, the PORT environment variable decides
+    /// everything (see `services`).
     #[arg(short, long)]
-    config: PathBuf,
+    config: Option<PathBuf>,
 }
 
 /// Plugin registry: protocol name -> implementation. Plugins that need
 /// persona-derived setup (e.g. the SSH identification string) validate it
 /// here, so a bad config fails at startup.
 fn plugin(cfg: &Config) -> anyhow::Result<Arc<dyn Protocol>> {
+    if cfg.shell_broker.is_some() && cfg.protocol != "ssh" {
+        anyhow::bail!("`shell` is only supported by the ssh protocol");
+    }
     match cfg.protocol.as_str() {
         "banner" => Ok(Arc::new(hp_proto_banner::Banner)),
-        "ssh" => Ok(Arc::new(hp_proto_ssh::Ssh::new(
-            cfg.persona.banner.as_deref(),
-        )?)),
+        "ssh" => {
+            let ssh = hp_proto_ssh::Ssh::new(cfg.persona.banner.as_deref())?;
+            Ok(Arc::new(match &cfg.shell_broker {
+                Some(socket) => ssh.with_shell_backend(Arc::new(ContainerBackend::new(socket))),
+                None => ssh,
+            }))
+        }
         other => anyhow::bail!("unknown protocol {other:?} (available: banner, ssh)"),
     }
 }
@@ -49,13 +59,19 @@ fn init_tracing() {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
-    let cfg = Config::load(&Cli::parse().config)?;
+    let cfg = match Cli::parse().config {
+        Some(path) => Config::load(&path)?,
+        None => Config::from_env(|k| std::env::var(k).ok())?,
+    };
     let proto = plugin(&cfg)?;
 
     // Fail closed: an invalid track means the honeypot does not start.
     let behavior: Arc<dyn BehaviorFactory> = match &cfg.track {
-        Some(path) => {
-            let track = hp_track::Track::load(path)?;
+        Some(source) => {
+            let track = match source {
+                TrackSource::File(path) => hp_track::Track::load(path)?,
+                TrackSource::Builtin(yaml) => hp_track::Track::from_yaml(yaml)?,
+            };
             tracing::info!(
                 track = track.name(),
                 states = track.state_count(),

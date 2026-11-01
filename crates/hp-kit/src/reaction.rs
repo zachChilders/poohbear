@@ -48,6 +48,7 @@ impl Reaction {
                 Action::Send(data) => v.welcome.extend_from_slice(&data),
                 Action::Prompt(p) => v.prompt = Some(p),
                 Action::Delay(d) => v.delay += d,
+                Action::OpenShell => v.real_shell = true,
                 Action::Close => v.close = true,
             }
         }
@@ -70,6 +71,8 @@ pub struct Verdict {
     pub delay: Duration,
     /// The behavior wants the connection dropped instead of an answer.
     pub close: bool,
+    /// Give this session a real shell when it asks for one.
+    pub real_shell: bool,
 }
 
 impl Verdict {
@@ -104,6 +107,17 @@ mod tests {
         assert_eq!(v.welcome, b"hi there");
         assert_eq!(v.delay, Duration::from_millis(12));
         assert_eq!(v.prompt.as_deref(), Some("$ "));
+    }
+
+    #[test]
+    fn open_shell_is_part_of_the_verdict() {
+        let v = Reaction::new(vec![Action::AuthResult(true), Action::OpenShell]).verdict();
+        assert!(v.granted() && v.real_shell);
+        assert!(
+            !Reaction::new(vec![Action::AuthResult(true)])
+                .verdict()
+                .real_shell
+        );
     }
 
     #[test]

@@ -9,12 +9,17 @@
 //! - [`conformance`]: assertions for rules every protocol must satisfy,
 //!   independent of its wire format.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use hp_core::{Action, Behavior, Event, Limits, Persona, SessionCtx};
+use async_trait::async_trait;
+use hp_core::{
+    Action, AsyncStream, Behavior, Event, Limits, Persona, SessionCtx, ShellBackend, ShellRequest,
+};
 use hp_log::LogSink;
 use serde_json::Value;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::mpsc::Receiver;
 
 pub use bytes::Bytes;
@@ -132,6 +137,112 @@ pub fn session(opts: CtxOptions) -> (SessionCtx, Observer) {
     (ctx, Observer { records, seen })
 }
 
+// ------------------------------------------------------------- shell backend
+
+/// A [`ShellBackend`] for tests: a tiny scripted "shell" on an in-memory
+/// stream. It prints `fake$ `, answers each line it is sent by calling the
+/// responder (`None` ends the shell), and records what it was asked to start
+/// and how many shells are still running.
+pub struct FakeBackend {
+    responder: fn(&str) -> Option<String>,
+    fail: bool,
+    requests: Mutex<Vec<ShellRequest>>,
+    live: Arc<AtomicUsize>,
+}
+
+impl FakeBackend {
+    pub fn new(responder: fn(&str) -> Option<String>) -> Arc<FakeBackend> {
+        Arc::new(FakeBackend {
+            responder,
+            fail: false,
+            requests: Mutex::default(),
+            live: Arc::default(),
+        })
+    }
+
+    /// A backend that cannot start shells.
+    pub fn failing() -> Arc<FakeBackend> {
+        Arc::new(FakeBackend {
+            responder: |_| None,
+            fail: true,
+            requests: Mutex::default(),
+            live: Arc::default(),
+        })
+    }
+
+    pub fn requests(&self) -> Vec<ShellRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    /// Shells started and not yet finished or dropped by the peer.
+    pub fn live(&self) -> usize {
+        self.live.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ShellBackend for FakeBackend {
+    async fn start(&self, request: ShellRequest) -> anyhow::Result<Box<dyn AsyncStream>> {
+        anyhow::ensure!(!self.fail, "no sandbox available");
+        let command = request.command.clone();
+        self.requests.lock().unwrap().push(request);
+        Ok(Box::new(spawn_fake_shell(
+            self.responder,
+            command,
+            self.live.clone(),
+        )))
+    }
+}
+
+/// Start the scripted shell behind [`FakeBackend`] and return the peer's end of
+/// its stream. `live` counts shells that have not ended or been dropped.
+pub fn spawn_fake_shell(
+    responder: fn(&str) -> Option<String>,
+    command: Option<String>,
+    live: Arc<AtomicUsize>,
+) -> DuplexStream {
+    let (peer, mut shell) = tokio::io::duplex(8192);
+    live.fetch_add(1, Ordering::SeqCst);
+    tokio::spawn(async move {
+        run_fake_shell(&mut shell, responder, command).await;
+        live.fetch_sub(1, Ordering::SeqCst);
+    });
+    peer
+}
+
+async fn run_fake_shell(
+    shell: &mut DuplexStream,
+    responder: fn(&str) -> Option<String>,
+    command: Option<String>,
+) {
+    if let Some(command) = command {
+        let _ = shell
+            .write_all(responder(&command).unwrap_or_default().as_bytes())
+            .await;
+        return;
+    }
+    let _ = shell.write_all(b"fake$ ").await;
+    let (mut buf, mut line) = ([0u8; 1024], String::new());
+    while let Ok(n @ 1..) = shell.read(&mut buf).await {
+        for &b in &buf[..n] {
+            if b != b'\r' && b != b'\n' {
+                line.push(b as char);
+                continue;
+            }
+            let Some(out) = responder(&std::mem::take(&mut line)) else {
+                return;
+            };
+            if shell
+                .write_all(format!("{out}fake$ ").as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
 // -------------------------------------------------------------- records
 
 /// Everything logged so far, parsed.
@@ -247,6 +358,50 @@ mod tests {
         assert_eq!(kinds(&recs), ["connect"]);
         assert_eq!(of_kind(&recs, "connect").len(), 1);
         conformance::envelope(&recs);
+    }
+
+    #[tokio::test]
+    async fn fake_backend_runs_a_scripted_shell_and_tracks_it() {
+        let backend = FakeBackend::new(|l| (l != "exit").then(|| format!("you said {l}\n")));
+        let req = ShellRequest {
+            session_id: "s".into(),
+            user: "root".into(),
+            command: None,
+            terminal: None,
+        };
+        let mut shell = backend.start(req.clone()).await.unwrap();
+        let mut buf = [0u8; 64];
+        let n = shell.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"fake$ ");
+        shell.write_all(b"hi\r").await.unwrap();
+        let n = shell.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"you said hi\nfake$ ");
+        assert_eq!((backend.requests(), backend.live()), (vec![req], 1));
+        shell.write_all(b"exit\n").await.unwrap();
+        assert_eq!(shell.read(&mut buf).await.unwrap(), 0, "the shell ended");
+        tokio::task::yield_now().await;
+        assert_eq!(backend.live(), 0);
+    }
+
+    #[tokio::test]
+    async fn fake_backend_commands_run_once_and_failure_is_an_error() {
+        let backend = FakeBackend::new(|c| Some(format!("ran {c}\n")));
+        let req = ShellRequest {
+            session_id: "s".into(),
+            user: "u".into(),
+            command: Some("id".into()),
+            terminal: None,
+        };
+        let mut out = Vec::new();
+        backend
+            .start(req.clone())
+            .await
+            .unwrap()
+            .read_to_end(&mut out)
+            .await
+            .unwrap();
+        assert_eq!(out, b"ran id\n");
+        assert!(FakeBackend::failing().start(req).await.is_err());
     }
 
     #[test]

@@ -10,13 +10,14 @@
 //! - The shell prompt is `user@host:~$ `; the working directory is not shown.
 
 mod handler;
+mod real;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use hp_core::{AsyncStream, Protocol, SessionCtx};
+use hp_core::{AsyncStream, Protocol, SessionCtx, ShellBackend};
 use hp_kit::term::to_crlf;
 use hp_kit::Driver;
 use russh::keys::{Algorithm, PrivateKey};
@@ -29,6 +30,8 @@ const DEFAULT_SERVER_ID: &str = "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6";
 
 pub struct Ssh {
     config: Arc<Config>,
+    /// Where real shells run, for tracks that `open_shell`.
+    backend: Option<Arc<dyn ShellBackend>>,
 }
 
 impl Ssh {
@@ -55,7 +58,16 @@ impl Ssh {
         };
         Ok(Ssh {
             config: Arc::new(config),
+            backend: None,
         })
+    }
+
+    /// Serve real shells from `backend` to sessions whose behavior asks for
+    /// one (`Action::OpenShell`). Without a backend such requests are refused
+    /// and logged.
+    pub fn with_shell_backend(mut self, backend: Arc<dyn ShellBackend>) -> Ssh {
+        self.backend = Some(backend);
+        self
     }
 }
 
@@ -94,7 +106,13 @@ impl Protocol for Ssh {
         let banner =
             (!text.is_empty()).then(|| String::from_utf8_lossy(&to_crlf(&text)).into_owned());
 
-        let conn = Conn::new(driver, ctx.persona.hostname.as_deref(), banner);
+        let conn = Conn::new(
+            driver,
+            ctx.session_id,
+            ctx.persona.hostname.as_deref(),
+            banner,
+            self.backend.clone(),
+        );
         match russh::server::run_stream(self.config.clone(), stream, conn).await {
             Ok(session) => session.await.or_else(routine),
             Err(e) => routine(e),
