@@ -1,0 +1,18 @@
+# SSH honeypot whose shells are real Linux sandboxes. The track decides who
+# gets in; the broker (config/broker.yaml, run as a separate privileged
+# process) owns Docker and starts one hardened container per shell.
+protocol: ssh
+listen:
+  - 127.0.0.1:2222
+persona:
+  hostname: plc-gw-03
+  banner: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6"
+track: tracks/ssh-real-shell.yaml
+shell:
+  broker: /run/honeypot/broker.sock
+limits:
+  max_sessions: 64
+  session_timeout: 15m
+  max_input_bytes: 1MiB
+logging:
+  json: ./sessions.jsonl

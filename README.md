@@ -49,6 +49,25 @@ If a track file has a mistake, Poohbear refuses to start rather than running hal
 - It never really runs anything the attacker types. Every response is made up.
 - It has caps on simultaneous visitors, session length and how much data it will accept, so it can't easily be overwhelmed.
 
+## Environment defaults and real shells
+
+Without a config file, `PORT` selects the protocol and its built-in track:
+
+```
+PORT=22 honeypot
+PORT=2222 honeypot
+PORT=23 honeypot
+```
+
+Ports 22 and 2222 use SSH; port 23 uses the raw banner service. `HONEYPOT_LOG`
+sets the JSONL session log path (the default is stdout). For full control over
+listeners, tracks, persona, and limits, pass `--config` as shown above.
+
+To enable real disposable container shells for SSH sessions, set
+`HONEYPOT_BROKER` to the broker socket path. The honeypot does not access Docker
+directly; see [docker/README.md](docker/README.md) for setup and security details.
+Ports below 1024 require root or `CAP_NET_BIND_SERVICE`.
+
 ## Not done yet
 
 - There is no fake file system yet, so `ls` and `cat` don't show anything realistic.

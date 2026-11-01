@@ -817,13 +817,36 @@ dependencies = [
  "async-trait",
  "clap",
  "futures-util",
+ "hp-broker",
  "hp-core",
  "hp-log",
  "hp-proto-banner",
  "hp-proto-ssh",
+ "hp-sandbox",
  "hp-track",
  "humantime",
  "russh",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "hp-broker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "hp-core",
+ "hp-sandbox",
+ "hp-testkit",
+ "humantime",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -897,9 +920,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "hp-sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hp-core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "hp-testkit"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "bytes",
  "hp-core",
  "hp-log",

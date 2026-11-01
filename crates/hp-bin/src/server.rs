@@ -407,6 +407,97 @@ states:
         assert_eq!(count("behavior_error") + count("error"), 0, "{kinds:?}");
     }
 
+    /// The container path, minus Docker: SSH client -> honeypot -> broker
+    /// socket -> (fake) sandbox. The track admits the login; the shell that
+    /// answers is the sandbox's, and the broker hardens and ends it.
+    #[tokio::test]
+    async fn ssh_real_shell_runs_in_a_sandbox_via_the_broker() {
+        use hp_broker::{fake::FakeRunner, server::bind, Broker, Policy};
+
+        let socket = std::env::temp_dir().join(format!("hp-bin-e2e-{}.sock", std::process::id()));
+        let policy = Policy::parse(&format!(
+            "socket: {}\nimage: honeypot/test:1\nhostname: plc-gw-03\nusers: [admin]\n",
+            socket.display()
+        ))
+        .unwrap();
+        let listener = bind(&policy).unwrap();
+        let runner = FakeRunner::new(|l| (l != "exit").then(|| format!("ran {l}\n")));
+        tokio::spawn(Broker::new(policy, runner.clone()).serve(listener));
+
+        let yaml = include_str!("../../../tracks/ssh-real-shell.yaml")
+            .replace("800ms..1500ms", "1ms")
+            .replace("delay: 400ms", "delay: 1ms");
+        let ssh = hp_proto_ssh::Ssh::new(None)
+            .unwrap()
+            .with_shell_backend(Arc::new(hp_sandbox::ContainerBackend::new(&socket)));
+        let (addr, mut rx) = serve(
+            Arc::new(ssh),
+            Arc::new(TrackFactory::new(
+                hp_track::Track::from_yaml(&yaml).unwrap(),
+            )),
+            Persona::default(),
+            4,
+            LONG,
+        )
+        .await;
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let mut c = russh::client::connect_stream(
+            Arc::new(russh::client::Config::default()),
+            tcp,
+            SshClient,
+        )
+        .await
+        .unwrap();
+        for pw in ["a", "b", "c"] {
+            assert!(!c
+                .authenticate_password("admin", pw)
+                .await
+                .unwrap()
+                .success());
+        }
+        assert!(c
+            .authenticate_password("admin", "d")
+            .await
+            .unwrap()
+            .success());
+
+        let mut ch = c.channel_open_session().await.unwrap();
+        ch.request_pty(true, "xterm", 100, 30, 0, 0, &[])
+            .await
+            .unwrap();
+        ch.request_shell(true).await.unwrap();
+        let mut seen = String::new();
+        let mut read_until = async |ch: &mut russh::Channel<russh::client::Msg>, needle: &str| {
+            while !seen.contains(needle) {
+                match tokio::time::timeout(Duration::from_secs(5), ch.wait()).await {
+                    Ok(Some(russh::ChannelMsg::Data { data })) => {
+                        seen.push_str(&String::from_utf8_lossy(&data))
+                    }
+                    Ok(Some(_)) => {}
+                    other => panic!("waiting for {needle:?}, got {other:?} after {seen:?}"),
+                }
+            }
+        };
+        read_until(&mut ch, "fake$ ").await;
+        ch.data(&b"id\n"[..]).await.unwrap();
+        read_until(&mut ch, "ran id").await;
+        ch.data(&b"exit\n"[..]).await.unwrap();
+        let _ = c.disconnect(russh::Disconnect::ByApplication, "", "").await;
+
+        let args = &runner.specs()[0];
+        assert!(
+            args.windows(2).any(|w| w == ["--network", "none"]),
+            "{args:?}"
+        );
+        let kinds = kinds_until(&mut rx, "disconnect").await;
+        assert!(
+            kinds.iter().any(|k| k == "rx"),
+            "typed input was logged: {kinds:?}"
+        );
+        assert!(!kinds.iter().any(|k| k == "error"), "{kinds:?}");
+    }
+
     #[tokio::test]
     async fn connections_over_the_cap_are_rejected_and_slots_are_reused() {
         let (addr, mut rx) = start(Mode::Hang, 1, Duration::from_millis(300)).await;
