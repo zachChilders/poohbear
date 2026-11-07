@@ -34,6 +34,8 @@ pub(crate) enum Setter {
 #[derive(Debug)]
 pub(crate) enum Step {
     Send(Template),
+    /// The shell prompt from now on (SSH; ignored by other plugins).
+    Prompt(Template),
     Set(Vec<(String, Setter)>),
     Delay(Delay),
     Auth(bool),
