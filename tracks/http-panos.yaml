@@ -1,0 +1,202 @@
+# Track for the `http` plugin: a Palo Alto Networks-style edge firewall,
+# `fw-edge01`, with its management web UI, XML API and a GlobalProtect
+# portal/gateway all reachable on one HTTPS listener (as on a badly exposed
+# box). See tracks/http-ops-portal.yaml for how `match`, `send` and captured
+# credentials work.
+#
+# Logins fail twice, then succeed: the web UI (`user`/`passwd` form), the
+# XML API (`type=keygen`) and GlobalProtect (`getconfig.esp`) each count
+# their own failures, per connection.
+name: http-panos
+vars:
+  failed_logins: 0
+  failed_keygen: 0
+  failed_gp: 0
+start: firewall
+
+states:
+  firewall:
+    on:
+      # ---- generic attack patterns: flag, then answer like a hardened box
+      - match: { op: '\$\{jndi:' }
+        do: [ { tag: log4shell_attempt }, { send: "HTTP/1.1 400 Bad Request\n\n" } ]
+      - match: { headers: '\$\{jndi:' }
+        do: [ { tag: log4shell_attempt }, { send: "HTTP/1.1 400 Bad Request\n\n" } ]
+      - match: { headers: '(?m)^[a-z-]+: \(\) \{' }
+        do: [ { tag: shellshock_attempt }, { send: "HTTP/1.1 404 Not Found\n\n" } ]
+      - match: { op: '(?i)(\.\./|\.\.%2f|%2e%2e|%252e)' }
+        do: [ { tag: path_traversal }, { send: "HTTP/1.1 400 Bad Request\n\n" } ]
+      - match: { headers: '(?mi)^cookie:.*(\.\./|%2e%2e)' }
+        do: [ { tag: path_traversal }, { send: "HTTP/1.1 400 Bad Request\n\n" } ]
+      - match: { op: '(?i)(;|%3b|\||%7c|`|\$\(|%24%28)(\s|%20|\+)*(wget|curl|sh|bash|nc|busybox)\b' }
+        do: [ { tag: command_injection }, { send: "HTTP/1.1 400 Bad Request\n\n" } ]
+      - match: { body: '(?i)(;|\||`|\$\()\s*(wget|curl|sh|bash|nc|busybox)\b' }
+        do: [ { tag: command_injection }, { send: "HTTP/1.1 400 Bad Request\n\n" } ]
+      - match: { headers: '(?mi)^x-pan-authcheck:' }
+        do: [ { tag: auth_bypass_probe }, { send: "HTTP/1.1 302 Found\nLocation: /php/login.php\n\n" } ]
+      - match: { path: '(?i)^/(wp-login\.php|wp-admin|xmlrpc\.php|phpmyadmin|\.env|\.git/|actuator|server-status)' }
+        do: [ { tag: product_probe }, { send: "HTTP/1.1 404 Not Found\n\n" } ]
+
+      # ---- management web UI
+      - match: { path: '^/(index\.php)?$', headers: '(?mi)^cookie:.*PHPSESSID=k3j9d2qv8m1f0r7t5c4b6n8p2a' }
+        do:
+          - tag: console_access
+          - send: |
+              <!DOCTYPE html>
+              <html><head><meta charset="utf-8"><title>fw-edge01</title></head>
+              <body><h2>Dashboard</h2>
+              <table>
+              <tr><th>Hostname</th><td>fw-edge01</td></tr>
+              <tr><th>Model</th><td>PA-3220</td></tr>
+              <tr><th>Software Version</th><td>10.2.7-h3</td></tr>
+              <tr><th>Management IP</th><td>10.0.0.1</td></tr>
+              <tr><th>Uptime</th><td>212 days, 4:17:09</td></tr>
+              <tr><th>HA</th><td>active (peer 10.0.0.2)</td></tr>
+              </table>
+              <p><a href="/php/logout.php">Logout</a></p>
+              </body></html>
+      - match: { method: '^(GET|HEAD)$', path: '^/$' }
+        do: [ { send: "HTTP/1.1 302 Found\nLocation: /php/login.php\n\n" } ]
+      - match: { method: '^(GET|HEAD)$', path: '^/php/login\.php$' }
+        do:
+          - send: |
+              HTTP/1.1 200 OK
+              Content-Type: text/html; charset=UTF-8
+              X-Frame-Options: DENY
+              X-XSS-Protection: 1; mode=block
+              X-Content-Type-Options: nosniff
+              Strict-Transport-Security: max-age=31536000;
+
+              <!DOCTYPE html>
+              <html><head><meta charset="utf-8"><title>Login</title></head>
+              <body class="login">
+              <div id="login_box">
+              <form id="login_form" method="post" action="/php/login.php">
+              <input type="hidden" name="prot" value="https:">
+              <input type="hidden" name="server" value="fw-edge01">
+              <label>Username <input type="text" name="user" id="user"></label><br>
+              <label>Password <input type="password" name="passwd" id="passwd"></label><br>
+              <input type="submit" name="ok" value="Log In">
+              </form>
+              </div></body></html>
+      - match: { method: '^POST$', path: '^/php/login\.php$', password: '' }
+        when: "failed_logins < 2"
+        do:
+          - tag: login_attempt
+          - set: { failed_logins: "failed_logins + 1" }
+          - delay: 700ms..1400ms
+          - auth: false
+          - send: |
+              HTTP/1.1 200 OK
+              Content-Type: text/html; charset=UTF-8
+              X-Frame-Options: DENY
+
+              <!DOCTYPE html>
+              <html><head><meta charset="utf-8"><title>Login</title></head>
+              <body class="login">
+              <div id="login_box">
+              <p class="error">Invalid username or password</p>
+              <form id="login_form" method="post" action="/php/login.php">
+              <input type="hidden" name="prot" value="https:">
+              <input type="hidden" name="server" value="fw-edge01">
+              <label>Username <input type="text" name="user" id="user"></label><br>
+              <label>Password <input type="password" name="passwd" id="passwd"></label><br>
+              <input type="submit" name="ok" value="Log In">
+              </form>
+              </div></body></html>
+      - match: { method: '^POST$', path: '^/php/login\.php$', password: '' }
+        do:
+          - tag: auth_success
+          - delay: 500ms
+          - auth: true
+          - send: "HTTP/1.1 302 Found\nLocation: /\nSet-Cookie: PHPSESSID=k3j9d2qv8m1f0r7t5c4b6n8p2a; path=/; secure; HttpOnly\n\n"
+      - match: { path: '^/php/logout\.php' }
+        do: [ { send: "HTTP/1.1 302 Found\nLocation: /php/login.php\nSet-Cookie: PHPSESSID=deleted; path=/; Max-Age=0\n\n" } ]
+      - match: { path: '^/php/' }
+        do: [ { send: "HTTP/1.1 302 Found\nLocation: /php/login.php\n\n" } ]
+
+      # ---- XML API
+      - match: { path: '^/api/?$', query: '(?i)(^|&)type=keygen' }
+        when: "failed_keygen < 2"
+        do:
+          - tag: api_keygen
+          - set: { failed_keygen: "failed_keygen + 1" }
+          - delay: 400ms..900ms
+          - auth: false
+          - send: "HTTP/1.1 403 Forbidden\nContent-Type: application/xml; charset=UTF-8\n\n<response status = 'error' code = '403'><result><msg>Invalid Credential</msg></result></response>\n"
+      - match: { path: '^/api/?$', query: '(?i)(^|&)type=keygen' }
+        do:
+          - tag: api_keygen
+          - tag: auth_success
+          - delay: 400ms
+          - auth: true
+          - send: "HTTP/1.1 200 OK\nContent-Type: application/xml; charset=UTF-8\n\n<response status = 'success'><result><key>LUFRPT1hcmVhNTFmb3JlbnNpY3M9eGg0YzFrMw==</key></result></response>\n"
+      - match: { path: '^/api/?$', query: '(?i)(^|&)key=LUFRPT1hcmVhNTFmb3JlbnNpY3M9eGg0YzFrMw' }
+        do:
+          - tag: api_command
+          - delay: 200ms..600ms
+          - send: "HTTP/1.1 200 OK\nContent-Type: application/xml; charset=UTF-8\n\n<response status=\"success\"><result><system><hostname>fw-edge01</hostname><model>PA-3220</model><sw-version>10.2.7-h3</sw-version><uptime>212 days, 4:17:09</uptime></system></result></response>\n"
+      - match: { path: '^/api/?$' }
+        do: [ { tag: api_probe }, { send: "HTTP/1.1 403 Forbidden\nContent-Type: application/xml; charset=UTF-8\n\n<response status = 'error' code = '403'><result><msg>Invalid Credential</msg></result></response>\n" } ]
+
+      # ---- GlobalProtect portal and gateway
+      - match: { path: '^/(global-protect|ssl-vpn)/prelogin\.esp$' }
+        do:
+          - tag: globalprotect_probe
+          - send: |
+              HTTP/1.1 200 OK
+              Content-Type: application/xml; charset=UTF-8
+              X-Frame-Options: DENY
+
+              <?xml version="1.0" encoding="UTF-8" ?>
+              <prelogin-response>
+              <status>Success</status>
+              <ccusername></ccusername>
+              <autosubmit>false</autosubmit>
+              <msg></msg>
+              <newmsg></newmsg>
+              <authentication-message>Enter login credentials</authentication-message>
+              <username-label>Username</username-label>
+              <password-label>Password</password-label>
+              <panos-version>1</panos-version>
+              <region>US</region>
+              </prelogin-response>
+      - match: { method: '^(GET|HEAD)$', path: '^/global-protect/login\.esp$' }
+        do:
+          - send: |
+              <!DOCTYPE html>
+              <html><head><meta charset="utf-8"><title>GlobalProtect Portal</title></head>
+              <body>
+              <form method="post" action="/global-protect/getconfig.esp">
+              <label>Username <input type="text" name="user"></label><br>
+              <label>Password <input type="password" name="passwd"></label><br>
+              <input type="submit" name="ok" value="Log In">
+              </form></body></html>
+      - match: { method: '^POST$', path: '^/(global-protect/getconfig|ssl-vpn/login)\.esp$', password: '' }
+        when: "failed_gp < 2"
+        do:
+          - tag: vpn_login_attempt
+          - set: { failed_gp: "failed_gp + 1" }
+          - delay: 800ms..1600ms
+          - auth: false
+          - send: "HTTP/1.1 512 Custom error\nContent-Type: text/html; charset=UTF-8\n\nInvalid username or password\n"
+      - match: { method: '^POST$', path: '^/(global-protect/getconfig|ssl-vpn/login)\.esp$', password: '' }
+        do:
+          - tag: auth_success
+          - delay: 600ms
+          - auth: true
+          - send: |
+              HTTP/1.1 200 OK
+              Content-Type: application/xml; charset=UTF-8
+
+              <?xml version="1.0" encoding="UTF-8" ?>
+              <policy>
+              <portal-name>GP-Portal</portal-name>
+              <version>6.1.1</version>
+              <gateways><external><list>
+              <entry name="vpn.corp.local"><description>HQ</description></entry>
+              </list></external></gateways>
+              </policy>
+      - match: { path: '^/(global-protect|ssl-vpn)/' }
+        do: [ { tag: globalprotect_probe }, { send: "HTTP/1.1 302 Found\nLocation: /global-protect/login.esp\n\n" } ]
+    fallback: { send: "" }
