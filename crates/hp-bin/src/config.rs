@@ -51,7 +51,9 @@ impl Config {
     /// turns on real shells; `HONEYPOT_LOG` sends session records to a file.
     /// TLS ports use `HONEYPOT_TLS_CERT` + `HONEYPOT_TLS_KEY` (PEM) if set,
     /// else a self-signed certificate for `HONEYPOT_TLS_NAMES` (comma
-    /// separated; the default is the built-in persona's hostname).
+    /// separated; the default is the built-in persona's names) issued to
+    /// organization `HONEYPOT_TLS_ORG` (the persona's by default; set it
+    /// empty for none).
     pub fn from_env(var: impl Fn(&str) -> Option<String>) -> anyhow::Result<Config> {
         let port: u16 = var("PORT")
             .context("set PORT (or pass --config)")?
@@ -87,12 +89,16 @@ impl Config {
                 },
                 (None, None) => CertSource::SelfSigned {
                     names: var("HONEYPOT_TLS_NAMES")
-                        .unwrap_or_else(|| DEFAULT_TLS_NAME.into())
+                        .unwrap_or_else(|| DEFAULT_TLS_NAMES.into())
                         .split(',')
                         .map(|n| n.trim().to_string())
                         .filter(|n| !n.is_empty())
                         .collect(),
-                    organization: None,
+                    organization: Some(
+                        var("HONEYPOT_TLS_ORG").unwrap_or_else(|| DEFAULT_TLS_ORG.into()),
+                    )
+                    .map(|o| o.trim().to_string())
+                    .filter(|o| !o.is_empty()),
                 },
                 _ => bail!("set both HONEYPOT_TLS_CERT and HONEYPOT_TLS_KEY, or neither"),
             });
@@ -132,8 +138,10 @@ impl Config {
     }
 }
 
-/// Self-signed certificate name when nothing else is given.
-const DEFAULT_TLS_NAME: &str = "plc-gw-03";
+/// Self-signed certificate names and organization when nothing else is given
+/// (the same persona as `config/https.yaml`).
+const DEFAULT_TLS_NAMES: &str = "plc-gw-03,plc-gw-03.ot.corp.local";
+const DEFAULT_TLS_ORG: &str = "Plant Operations";
 
 // ---- on-disk shape (private: only `Config::parse` sees it) ----
 
@@ -332,18 +340,31 @@ mod tests {
         assert_eq!(
             c.tls,
             Some(CertSource::SelfSigned {
-                names: vec!["plc-gw-03".into()],
-                organization: None
+                names: vec!["plc-gw-03".into(), "plc-gw-03.ot.corp.local".into()],
+                organization: Some("Plant Operations".into())
             })
         );
         let c = Config::from_env(env(&[
             ("PORT", "8443"),
             ("HONEYPOT_TLS_NAMES", "a.corp, b"),
+            ("HONEYPOT_TLS_ORG", " Acme Ltd "),
         ]))
         .unwrap();
-        assert!(
-            matches!(c.tls, Some(CertSource::SelfSigned { names, .. }) if names == ["a.corp", "b"])
+        assert_eq!(
+            c.tls,
+            Some(CertSource::SelfSigned {
+                names: vec!["a.corp".into(), "b".into()],
+                organization: Some("Acme Ltd".into())
+            })
         );
+        let c = Config::from_env(env(&[("PORT", "443"), ("HONEYPOT_TLS_ORG", "")])).unwrap();
+        assert!(matches!(
+            c.tls,
+            Some(CertSource::SelfSigned {
+                organization: None,
+                ..
+            })
+        ));
         let c = Config::from_env(env(&[
             ("PORT", "443"),
             ("HONEYPOT_TLS_CERT", "/c"),

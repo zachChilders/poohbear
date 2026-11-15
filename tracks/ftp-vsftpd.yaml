@@ -1,14 +1,28 @@
-# Track for the `ftp` plugin: an old vsftpd on a neglected gateway box.
+# Track for the `ftp` plugin: an old vsftpd 3.0.3 (stock Debian/Ubuntu
+# config: listen=YES, ssl off, anonymous off) on a neglected gateway box.
 # The plugin handles the control connection only (no data connections), so
 # transfers are refused with 425 and flagged: what someone *tried* to fetch or
 # upload is the interesting part.
 # - USER arrives as a `command` (reply 331); PASS arrives as `auth_attempt`.
 #   Text sent next to `auth` is the reply line for either outcome.
 # - replies must end in "\r\n".
+# - Reply texts follow vsftpd 3.0.3's prelogin.c / postlogin.c / features.c
+#   byte for byte. vsftpd compares the verb (text before the first space,
+#   upper-cased) exactly, so verbs are matched as `^VERB( |$)`: `SYSTEM` is
+#   an unknown command, not SYST.
+# - Before login vsftpd only knows USER, PASS, QUIT, FEAT and OPTS (plus
+#   AUTH/PBSZ/PROT with ssl on); everything else, SYST/STAT/HELP/NOOP
+#   included, gets `530 Please login with USER and PASS.`, and empty lines are
+#   silently ignored.
+# - The track engine does not expose the client address, so STAT's
+#   "Connected to" line uses the fixed `client_ip` below.
 name: ftp-vsftpd
 vars:
   failed_logins: 0
   cwd: /
+  login_user: ""
+  type_name: ASCII
+  client_ip: 192.168.1.104
 start: auth
 
 states:
@@ -16,8 +30,13 @@ states:
     on:
       - match: { event: connected }
         do: [ { send: "220 (vsFTPd 3.0.3)\r\n" } ]
-      - match: { command: "(?i)^USER " }
+      # "Deliberately ignore to avoid NAT device bugs" (prelogin.c).
+      - match: { command: "^$" }
+      - match: { command: "(?i)^USER( |$)" }
         do: [ { send: "331 Please specify the password.\r\n" } ]
+      - match: { event: auth_attempt }
+        when: "user == ''"
+        do: [ { send: "503 Login with USER first.\r\n" } ]
       - match: { event: auth_attempt }
         when: "failed_logins < 3"
         do:
@@ -25,33 +44,105 @@ states:
           - delay: 800ms..1500ms
           - auth: false
           - send: "530 Login incorrect.\r\n"
-      - match: { event: auth_attempt }
+      # vsftpd maps anonymous logins to the `ftp` user, chrooted to its home.
+      - match: { user: "(?i)^(anonymous|ftp)$" }
         do:
           - tag: auth_success
+          - set: { login_user: "${'ftp'}", cwd: "${'/'}" }
           - delay: 300ms
           - auth: true
           - send: "230 Login successful.\r\n"
           - goto: session
-      - match: { command: "(?i)^QUIT" }
+      - match: { event: auth_attempt }
+        do:
+          - tag: auth_success
+          - set: { login_user: "${user}", cwd: "/home/${user}" }
+          - delay: 300ms
+          - auth: true
+          - send: "230 Login successful.\r\n"
+          - goto: session
+      - match: { command: "(?i)^QUIT( |$)" }
         do: [ { send: "221 Goodbye.\r\n" }, { close: true } ]
+      - match: { command: "(?i)^FEAT( |$)" }
+        do: [ { send: "211-Features:\r\n EPRT\r\n EPSV\r\n MDTM\r\n PASV\r\n REST STREAM\r\n SIZE\r\n TVFS\r\n211 End\r\n" } ]
+      - match: { command: "(?i)^OPTS UTF8 ON$" }
+        do: [ { send: "200 Always in UTF8 mode.\r\n" } ]
+      - match: { command: "(?i)^OPTS( |$)" }
+        do: [ { send: "501 Option not understood.\r\n" } ]
     fallback: { send: "530 Please login with USER and PASS.\r\n" }
 
   session:
     on:
-      - match: { command: "(?i)^SYST" }
+      - match: { command: "(?i)^SYST( |$)" }
         do: [ { send: "215 UNIX Type: L8\r\n" } ]
-      - match: { command: "(?i)^FEAT" }
-        do: [ { send: "211-Features:\r\n EPRT\r\n EPSV\r\n MDTM\r\n PASV\r\n SIZE\r\n UTF8\r\n211 End\r\n" } ]
-      - match: { command: "(?i)^PWD" }
+      - match: { command: "(?i)^FEAT( |$)" }
+        do: [ { send: "211-Features:\r\n EPRT\r\n EPSV\r\n MDTM\r\n PASV\r\n REST STREAM\r\n SIZE\r\n TVFS\r\n211 End\r\n" } ]
+      - match: { command: "(?i)^STAT$" }
+        do:
+          - send: "211-FTP server status:\r\n     Connected to ${client_ip}\r\n     Logged in as ${login_user}\r\n     TYPE: ${type_name}\r\n     No session bandwidth limit\r\n     Session timeout in seconds is 300\r\n     Control connection is plain text\r\n     Data connections will be plain text\r\n     At session startup, client count was 1\r\n     vsFTPd 3.0.3 - secure, fast, stable\r\n211 End of status\r\n"
+      # STAT <path> lists over the control channel; nothing to show here.
+      - match: { command: "(?i)^STAT " }
+        do: [ { send: "213-Status follows:\r\n213 End of status\r\n" } ]
+      - match: { command: "(?i)^HELP( |$)" }
+        do:
+          - send: "214-The following commands are recognized.\r\n ABOR ACCT ALLO APPE CDUP CWD  DELE EPRT EPSV FEAT HELP LIST MDTM MKD\r\n MODE NLST NOOP OPTS PASS PASV PORT PWD  QUIT REIN REST RETR RMD  RNFR\r\n RNTO SITE SIZE SMNT STAT STOR STOU STRU SYST TYPE USER XCUP XCWD XMKD\r\n XPWD XRMD\r\n214 Help OK.\r\n"
+      - match: { command: "(?i)^NOOP( |$)" }
+        do: [ { send: "200 NOOP ok.\r\n" } ]
+      - match: { command: "(?i)^X?PWD( |$)" }
         do: [ { send: "257 \"${cwd}\" is the current directory\r\n" } ]
-      - match: { command: "(?i)^CWD (?P<dir>\\S+)" }
+      - match: { command: "(?i)^(X?CWD \\.\\.|CDUP|XCUP)( |$)" }
+        do: [ { set: { cwd: "dirname(cwd)" } }, { send: "250 Directory successfully changed.\r\n" } ]
+      - match: { command: "(?i)^X?CWD (?P<dir>/.*)$" }
         do: [ { set: { cwd: "${dir}" } }, { send: "250 Directory successfully changed.\r\n" } ]
-      - match: { command: "(?i)^TYPE " }
-        do: [ { send: "200 Switching mode.\r\n" } ]
-      - match: { command: "(?i)^(PASV|EPSV|PORT|EPRT)" }
+      - match: { command: "(?i)^X?CWD (?P<dir>.+)$" }
+        when: "cwd == '/'"
+        do: [ { set: { cwd: "/${dir}" } }, { send: "250 Directory successfully changed.\r\n" } ]
+      - match: { command: "(?i)^X?CWD (?P<dir>.+)$" }
+        do: [ { set: { cwd: "${cwd}/${dir}" } }, { send: "250 Directory successfully changed.\r\n" } ]
+      - match: { command: "(?i)^X?CWD( |$)" }
+        do: [ { send: "550 Failed to change directory.\r\n" } ]
+      - match: { command: "(?i)^TYPE (I|L8|L 8)$" }
+        do: [ { set: { type_name: "${'BINARY'}" } }, { send: "200 Switching to Binary mode.\r\n" } ]
+      - match: { command: "(?i)^TYPE (A|A N)$" }
+        do: [ { set: { type_name: "${'ASCII'}" } }, { send: "200 Switching to ASCII mode.\r\n" } ]
+      - match: { command: "(?i)^TYPE( |$)" }
+        do: [ { send: "500 Unrecognised TYPE command.\r\n" } ]
+      - match: { command: "(?i)^MODE S$" }
+        do: [ { send: "200 Mode set to S.\r\n" } ]
+      - match: { command: "(?i)^MODE( |$)" }
+        do: [ { send: "504 Bad MODE command.\r\n" } ]
+      - match: { command: "(?i)^STRU F$" }
+        do: [ { send: "200 Structure set to F.\r\n" } ]
+      - match: { command: "(?i)^STRU( |$)" }
+        do: [ { send: "504 Bad STRU command.\r\n" } ]
+      - match: { command: "(?i)^OPTS UTF8 ON$" }
+        do: [ { send: "200 Always in UTF8 mode.\r\n" } ]
+      - match: { command: "(?i)^OPTS( |$)" }
+        do: [ { send: "501 Option not understood.\r\n" } ]
+      - match: { command: "(?i)^(PASV|EPSV|PORT|EPRT)( |$)" }
         do: [ { tag: data_channel_attempt }, { send: "425 Can't open data connection.\r\n" } ]
-      - match: { command: "(?i)^(LIST|NLST|RETR|STOR|APPE)" }
+      - match: { command: "(?i)^(LIST|NLST|RETR|STOR|APPE)( |$)" }
         do: [ { tag: transfer_attempt }, { send: "425 Use PORT or PASV first.\r\n" } ]
-      - match: { command: "(?i)^(QUIT|BYE)" }
+      - match: { command: "(?i)^SIZE( |$)" }
+        do: [ { send: "550 Could not get file size.\r\n" } ]
+      - match: { command: "(?i)^MDTM( |$)" }
+        do: [ { send: "550 Could not get file modification time.\r\n" } ]
+      - match: { command: "(?i)^REST (?P<pos>[0-9]+)$" }
+        do: [ { send: "350 Restart position accepted (${pos}).\r\n" } ]
+      - match: { command: "(?i)^ABOR( |$)" }
+        do: [ { send: "225 No transfer to ABOR.\r\n" } ]
+      - match: { command: "(?i)^ALLO( |$)" }
+        do: [ { send: "202 ALLO command ignored.\r\n" } ]
+      - match: { command: "(?i)^(?P<verb>REIN|ACCT|SMNT)( |$)" }
+        do: [ { send: "502 ${upper(verb)} not implemented.\r\n" } ]
+      - match: { command: "(?i)^SITE HELP$" }
+        do: [ { send: "214 CHMOD UMASK HELP\r\n" } ]
+      - match: { command: "(?i)^SITE( |$)" }
+        do: [ { send: "500 Unknown SITE command.\r\n" } ]
+      - match: { command: "(?i)^USER( |$)" }
+        do: [ { send: "530 Can't change to another user.\r\n" } ]
+      - match: { event: auth_attempt }
+        do: [ { send: "230 Already logged in.\r\n" } ]
+      - match: { command: "(?i)^QUIT( |$)" }
         do: [ { send: "221 Goodbye.\r\n" }, { close: true } ]
     fallback: { send: "500 Unknown command.\r\n" }

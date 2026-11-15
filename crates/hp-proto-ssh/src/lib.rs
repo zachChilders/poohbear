@@ -6,21 +6,21 @@
 //! exact mapping between SSH callbacks and `Event`/`Action`.
 //!
 //! Known limits of this version:
-//! - The host key is generated fresh at startup, so it changes on restart.
+//! - The host keys are generated fresh at startup, so they change on restart.
 //! - The shell prompt is `user@host:~$ `; the working directory is not shown.
 
+mod algorithms;
 mod handler;
 mod real;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::bail;
 use async_trait::async_trait;
 use hp_core::{AsyncStream, Protocol, SessionCtx, ShellBackend};
 use hp_kit::term::to_crlf;
 use hp_kit::Driver;
-use russh::keys::{Algorithm, PrivateKey};
 use russh::server::Config;
 use russh::SshId;
 
@@ -42,11 +42,11 @@ impl Ssh {
         let id = server_id.unwrap_or(DEFAULT_SERVER_ID);
         validate_server_id(id)?;
 
-        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
-            .context("generating host key")?;
         let config = Config {
             server_id: SshId::Standard(id.to_string().into()),
-            keys: vec![key],
+            keys: algorithms::host_keys()?,
+            // Match the OpenSSH build the banner claims; see `algorithms`.
+            preferred: algorithms::preferred(),
             // Passwords are what we want to capture; keys are only recorded.
             methods: handler::methods(),
             // The behavior decides pacing; no extra fixed delay on top of it.
