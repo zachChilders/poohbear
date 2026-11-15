@@ -1,0 +1,16 @@
+services:
+  honeypot:
+    build: .
+    image: poohbear/honeypot:latest
+    ports:
+      - "2222:2222"
+    environment:
+      PORT: "2222"
+      # Send session records to a file instead of stdout:
+      # HONEYPOT_LOG: /data/sessions.jsonl
+    # volumes:
+    #   - honeypot-data:/data
+    restart: unless-stopped
+
+# volumes:
+#   honeypot-data:
