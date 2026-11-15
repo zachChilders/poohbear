@@ -1,7 +1,7 @@
 //! Protocol-level tests: a real `russh` client talks to `Ssh::handle` over an
 //! in-memory stream, with a scripted `Behavior` standing in for the track.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use hp_core::{Action, Event, Protocol};
@@ -71,6 +71,8 @@ struct Opts {
     hostname: Option<&'static str>,
     max_input_bytes: u64,
     backend: Option<Arc<FakeBackend>>,
+    /// The client's algorithm offer; narrowed to pin one algorithm.
+    client_preferred: russh::Preferred,
 }
 
 impl Default for Opts {
@@ -80,12 +82,24 @@ impl Default for Opts {
             hostname: Some("plc-gw-03"),
             max_input_bytes: 1 << 20,
             backend: None,
+            client_preferred: russh::Preferred::default(),
         }
     }
 }
 
 async fn start(opts: Opts) -> Harness {
     try_start(opts).await.expect("client connects")
+}
+
+fn new_ssh() -> Ssh {
+    Ssh::new(Some("SSH-2.0-OpenSSH_8.9p1 Test")).unwrap()
+}
+
+/// One server for every test without a backend: generating the RSA host key
+/// takes seconds in a debug build.
+fn shared_ssh() -> Arc<Ssh> {
+    static SSH: OnceLock<Arc<Ssh>> = OnceLock::new();
+    SSH.get_or_init(|| Arc::new(new_ssh())).clone()
 }
 
 async fn try_start(opts: Opts) -> Result<Harness, russh::Error> {
@@ -96,18 +110,21 @@ async fn try_start(opts: Opts) -> Result<Harness, russh::Error> {
         ..CtxOptions::default()
     });
     let (server_io, client_io) = tokio::io::duplex(1 << 16);
-    let mut ssh = Ssh::new(Some("SSH-2.0-OpenSSH_8.9p1 Test")).unwrap();
-    if let Some(backend) = opts.backend {
-        ssh = ssh.with_shell_backend(backend);
-    }
+    let ssh = match opts.backend {
+        Some(backend) => Arc::new(new_ssh().with_shell_backend(backend)),
+        None => shared_ssh(),
+    };
     let server = tokio::spawn(async move { ssh.handle(Box::new(server_io), ctx).await });
 
     let banner = Arc::new(Mutex::new(String::new()));
     let handler = Client {
         banner: banner.clone(),
     };
-    let client =
-        client::connect_stream(Arc::new(client::Config::default()), client_io, handler).await?;
+    let config = client::Config {
+        preferred: opts.client_preferred,
+        ..client::Config::default()
+    };
+    let client = client::connect_stream(Arc::new(config), client_io, handler).await?;
     Ok(Harness {
         client,
         obs,
@@ -188,6 +205,128 @@ async fn read_to_close(ch: &mut Channel<client::Msg>) -> (String, Option<u32>) {
 }
 
 // ---------------------------------------------------------------- tests
+
+/// Every algorithm the server advertises must actually work: pin the client
+/// to each one in turn and run a full login and command over it.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_advertised_algorithm_completes_a_session() {
+    use russh::keys::{EcdsaCurve, HashAlg};
+    use russh::{cipher, compression, kex, mac};
+    use std::borrow::Cow;
+
+    let base = russh::Preferred::default();
+    let mut cases: Vec<(String, russh::Preferred)> = Vec::new();
+    for k in [
+        kex::CURVE25519,
+        kex::CURVE25519_PRE_RFC_8731,
+        kex::ECDH_SHA2_NISTP256,
+        kex::ECDH_SHA2_NISTP384,
+        kex::ECDH_SHA2_NISTP521,
+        kex::DH_GEX_SHA256,
+        kex::DH_G16_SHA512,
+        kex::DH_G18_SHA512,
+        kex::DH_G14_SHA256,
+    ] {
+        let list = vec![
+            k,
+            kex::EXTENSION_SUPPORT_AS_CLIENT,
+            kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+        ];
+        cases.push((
+            k.as_ref().into(),
+            russh::Preferred {
+                kex: Cow::Owned(list),
+                ..base.clone()
+            },
+        ));
+    }
+    for a in [
+        Algorithm::Rsa {
+            hash: Some(HashAlg::Sha512),
+        },
+        Algorithm::Rsa {
+            hash: Some(HashAlg::Sha256),
+        },
+        Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP256,
+        },
+        Algorithm::Ed25519,
+    ] {
+        cases.push((
+            a.to_string(),
+            russh::Preferred {
+                key: Cow::Owned(vec![a]),
+                ..base.clone()
+            },
+        ));
+    }
+    for c in [
+        cipher::CHACHA20_POLY1305,
+        cipher::AES_128_CTR,
+        cipher::AES_192_CTR,
+        cipher::AES_256_CTR,
+        cipher::AES_128_GCM,
+        cipher::AES_256_GCM,
+    ] {
+        cases.push((
+            c.as_ref().into(),
+            russh::Preferred {
+                cipher: Cow::Owned(vec![c]),
+                ..base.clone()
+            },
+        ));
+    }
+    for m in [
+        mac::HMAC_SHA256_ETM,
+        mac::HMAC_SHA512_ETM,
+        mac::HMAC_SHA1_ETM,
+        mac::HMAC_SHA256,
+        mac::HMAC_SHA512,
+        mac::HMAC_SHA1,
+    ] {
+        // MACs are only used with a non-AEAD cipher.
+        cases.push((
+            m.as_ref().into(),
+            russh::Preferred {
+                cipher: Cow::Owned(vec![cipher::AES_128_CTR]),
+                mac: Cow::Owned(vec![m]),
+                ..base.clone()
+            },
+        ));
+    }
+    for z in [compression::NONE, compression::ZLIB_LEGACY] {
+        cases.push((
+            z.as_ref().into(),
+            russh::Preferred {
+                compression: Cow::Owned(vec![z]),
+                ..base.clone()
+            },
+        ));
+    }
+
+    // Independent sessions; run them side by side to keep the test quick
+    // (the 8192-bit DH group alone takes ~20s in a debug build).
+    let mut sessions = tokio::task::JoinSet::new();
+    for (name, preferred) in cases {
+        sessions.spawn(async move {
+            let mut h = try_start(Opts {
+                client_preferred: preferred,
+                ..Opts::default()
+            })
+            .await
+            .unwrap_or_else(|e| panic!("{name}: handshake failed: {e:?}"));
+            h.login().await;
+            let mut ch = h.client.channel_open_session().await.unwrap();
+            ch.exec(true, "whoami").await.unwrap();
+            let (out, status) = read_to_close(&mut ch).await;
+            assert_eq!((out.as_str(), status), ("admin\n", Some(0)), "{name}");
+            h.finish().await;
+        });
+    }
+    while let Some(done) = sessions.join_next().await {
+        done.unwrap();
+    }
+}
 
 #[tokio::test]
 async fn password_attempts_are_judged_by_the_behavior_and_logged_in_full() {

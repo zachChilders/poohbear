@@ -151,7 +151,9 @@ PORT=443 honeypot
 Ports 22 and 2222 use SSH; ports 21 and 2121 use FTP; ports 80 and 8080 use HTTP; ports 443 and
 8443 use HTTPS; port 23 uses the raw banner service. HTTPS uses `HONEYPOT_TLS_CERT` and
 `HONEYPOT_TLS_KEY` (PEM files) if both are set. Otherwise it generates a self-signed certificate
-for `HONEYPOT_TLS_NAMES` (comma-separated; `plc-gw-03` by default). `HONEYPOT_LOG`
+for `HONEYPOT_TLS_NAMES` (comma-separated; `plc-gw-03,plc-gw-03.ot.corp.local` by default),
+issued to the organization in `HONEYPOT_TLS_ORG` (`Plant Operations` by default; set it empty to
+leave the organization out). `HONEYPOT_LOG`
 sets the JSONL session log path (the default is stdout). For full control over
 listeners, tracks, persona, and limits, pass `--config` as shown above.
 
