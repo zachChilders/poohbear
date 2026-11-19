@@ -261,6 +261,20 @@ impl Compiler {
                         None
                     }
                 },
+                "prompt" => match val.as_str().map(Template::parse) {
+                    Some(Ok(t)) => {
+                        t.check(known, &mut errs);
+                        Some(Step::Prompt(t))
+                    }
+                    Some(Err(e)) => {
+                        errs.push(format!("`prompt`: {e}"));
+                        None
+                    }
+                    None => {
+                        errs.push("`prompt` needs a string".into());
+                        None
+                    }
+                },
                 "set" => self.set_step(&val, known, vars, &mut errs),
                 "delay" => match val.as_str().map(parse_delay) {
                     Some(Ok(d)) => Some(Step::Delay(d)),
@@ -313,7 +327,7 @@ impl Compiler {
                     _ => Some(Step::Close),
                 },
                 other => {
-                    errs.push(format!("unknown step `{other}` (expected send, set, delay, auth, open_shell, goto, tag, close)"));
+                    errs.push(format!("unknown step `{other}` (expected send, prompt, set, delay, auth, open_shell, goto, tag, close)"));
                     None
                 }
             };

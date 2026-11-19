@@ -1,0 +1,64 @@
+# Track for the `ssh` plugin: the operational-mode CLI of the fw-edge01
+# firewall (see tracks/http-panos.yaml). The `prompt` step replaces the
+# default `user@host:~$ ` prompt.
+name: ssh-panos
+vars:
+  failed_logins: 0
+  cli_user: admin
+start: auth
+
+states:
+  auth:
+    on:
+      - match: { event: auth_attempt }
+        when: "failed_logins < 2"
+        do:
+          - set: { failed_logins: "failed_logins + 1" }
+          - delay: 900ms..1600ms
+          - auth: false
+      - match: { event: auth_attempt, user: '^(?P<who>[A-Za-z0-9._-]{1,32})$' }
+        do:
+          - tag: auth_success
+          - delay: 500ms
+          - auth: true
+          - prompt: "${who}@fw-edge01> "
+          - set: { cli_user: "${who}" }
+          - send: "Last login: Mon Nov  2 08:41:17 2026 from 10.0.0.14\n\nNumber of failed attempts since last successful login: 0\n\n"
+          - goto: cli
+      - match: { event: auth_attempt }
+        do: [ { delay: 900ms }, { auth: false } ]
+    fallback:
+      close: true
+
+  cli:
+    on:
+      - match: { command: '^\s*$' }
+      - match: { command: '^show system info' }
+        do:
+          - send: "\nhostname: fw-edge01\nip-address: 10.0.0.1\nnetmask: 255.255.255.0\ndefault-gateway: 10.0.0.254\nmodel: PA-3220\nserial: 0123456789AB\nsw-version: 10.2.7-h3\napp-version: 8795-8489\nthreat-version: 8795-8489\nuptime: 212 days, 4:17:09\noperational-mode: normal\n\n"
+      - match: { command: '^show clock' }
+        do: [ { send: "Sat Nov  7 12:00:00 UTC 2026\n" } ]
+      - match: { command: '^show (session|interface) ' }
+        do: [ { tag: recon }, { delay: 300ms..900ms }, { send: "\n" } ]
+      - match: { command: '^show config running' }
+        do: [ { tag: config_dump }, { delay: 1s..2s }, { send: "Server error : Cannot read running configuration. Please retry.\n" } ]
+      - match: { command: '^configure$' }
+        do: [ { tag: config_mode }, { prompt: "${cli_user}@fw-edge01# " }, { send: "Entering configuration mode\n[edit]\n" }, { goto: config } ]
+      - match: { command: '^(exit|quit)$' }
+        do: [ { close: true } ]
+      - match: { command: '^(sh|bash|/bin/\S+|wget|curl|uname|id|whoami|cat|ls)\b' }
+        do: [ { tag: shell_escape_attempt }, { send: "Unknown command: ${argv0}\n" } ]
+    fallback:
+      send: "Unknown command: ${argv0}\n"
+
+  config:
+    on:
+      - match: { command: '^\s*$' }
+      - match: { command: '^(set|delete|edit) ' }
+        do: [ { tag: config_change }, { send: "[edit]\n" } ]
+      - match: { command: '^commit' }
+        do: [ { tag: commit_attempt }, { delay: 3s..6s }, { send: "Commit job 1187 is in progress. Use Ctrl+C to return to command prompt\n...............Server error : commit failed\n" } ]
+      - match: { command: '^(exit|quit)$' }
+        do: [ { prompt: "${cli_user}@fw-edge01> " }, { send: "Exiting configuration mode\n" }, { goto: cli } ]
+    fallback:
+      send: "Unknown command: ${argv0}\n[edit]\n"

@@ -48,6 +48,13 @@ To try the web console, use `config/http.yaml` and browse to `http://127.0.0.1:8
 works. For `http`, the log also records every request (method, path, headers and body) and any
 credentials it carried (Basic auth, or a login form posted as fields or JSON).
 
+To pose as a Palo Alto Networks-style edge firewall (`fw-edge01`, a PA-3220), use
+`config/panos.yaml` and browse to `https://127.0.0.1:8443/`. One HTTPS listener serves the
+management web UI (`/php/login.php`), the XML API (`/api/?type=keygen...`) and a GlobalProtect
+portal and gateway (`/global-protect/`, `/ssl-vpn/`). Each login fails twice, then works.
+`config/panos-ssh.yaml` serves the matching CLI over SSH, with a `admin@fw-edge01>` prompt,
+`show system info` and a configuration mode that never manages to commit.
+
 To try the simple text-device version instead, use `config/banner.yaml` and connect with `nc 127.0.0.1 2323`.
 
 ## Changing how it behaves
@@ -55,7 +62,7 @@ To try the simple text-device version instead, use `config/banner.yaml` and conn
 You don't need to touch any code to change the personality. Two small files control everything:
 
 - **A config file** (`config/*.yaml`) says what to pretend to be: the hostname, the version banner, which port to listen on, how many visitors at once, how long a session may last, and where to write the log.
-- **A track file** (`tracks/*.yaml`) is the script: who gets in, what each command prints, how long to hesitate, and what to flag as suspicious. Edit `tracks/ssh-linux-gateway.yaml` to add new commands or change the welcome message.
+- **A track file** (`tracks/*.yaml`) is the script: who gets in, what each command prints, how long to hesitate, and what to flag as suspicious. Edit `tracks/ssh-linux-gateway.yaml` to add new commands or change the welcome message. A `prompt` step changes the shell prompt (see `tracks/ssh-panos.yaml`).
 
 If a track file has a mistake, Poohbear refuses to start rather than running half-broken.
 

@@ -1,0 +1,14 @@
+# SSH honeypot posing as the CLI of the fw-edge01 firewall (see panos.yaml).
+protocol: ssh
+listen:
+  - 127.0.0.1:2222
+persona:
+  hostname: fw-edge01
+  banner: "SSH-2.0-OpenSSH_8.0"
+track: tracks/ssh-panos.yaml
+limits:
+  max_sessions: 256
+  session_timeout: 15m
+  max_input_bytes: 1MiB
+logging:
+  json: ./panos-ssh-sessions.jsonl

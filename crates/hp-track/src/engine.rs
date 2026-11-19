@@ -132,6 +132,10 @@ impl Session {
                         Err(e) => out.errors.push(format!("send: {e}")),
                     }
                 }
+                Step::Prompt(t) => match t.render(&|n| self.lookup(env, n)) {
+                    Ok(s) => out.actions.push(Action::Prompt(s)),
+                    Err(e) => out.errors.push(format!("prompt: {e}")),
+                },
                 Step::Set(sets) => {
                     for (name, setter) in sets {
                         let r = match setter {

@@ -324,3 +324,93 @@ fn every_shipped_track_is_valid() {
     }
     assert!(loaded >= 2, "found {loaded} tracks");
 }
+
+fn prompt(o: &Outcome) -> Option<String> {
+    o.actions.iter().find_map(|a| match a {
+        Action::Prompt(p) => Some(p.clone()),
+        _ => None,
+    })
+}
+
+fn panos(track: &str) -> Session {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tracks");
+    Session::new(Arc::new(Track::load(&dir.join(track)).unwrap()), 7)
+}
+
+#[test]
+fn panos_cli_sets_its_own_prompt_and_tracks_config_mode() {
+    let mut s = panos("ssh-panos.yaml");
+    assert_eq!(auth(&s.step(&login("admin"))), Some(false));
+    assert_eq!(auth(&s.step(&login("admin"))), Some(false));
+    let o = s.step(&login("admin"));
+    assert_eq!(auth(&o), Some(true));
+    assert_eq!(prompt(&o).as_deref(), Some("admin@fw-edge01> "));
+    assert!(sent(&s.step(&cmd("show system info"))).contains("model: PA-3220"));
+    assert_eq!(sent(&s.step(&cmd("ls -la"))), "Unknown command: ls\n");
+    let o = s.step(&cmd("configure"));
+    assert_eq!(prompt(&o).as_deref(), Some("admin@fw-edge01# "));
+    assert_eq!(s.state(), "config");
+    assert_eq!(
+        s.step(&cmd("set deviceconfig system hostname x")).tags,
+        ["config_change"]
+    );
+    let o = s.step(&cmd("exit"));
+    assert_eq!(prompt(&o).as_deref(), Some("admin@fw-edge01> "));
+    assert_eq!(s.state(), "cli");
+}
+
+#[test]
+fn panos_web_ui_api_and_globalprotect() {
+    use serde_json::json;
+    let req = |method: &str, path: &str, query: &str, extra: serde_json::Value| {
+        let mut args = json!({
+            "method": method, "path": path, "query": query, "headers": "", "body": ""
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            args[k] = v.clone();
+        }
+        Event::Request {
+            op: format!("{method} {path}"),
+            args,
+        }
+    };
+    let creds = json!({ "user": "admin", "password": "admin" });
+    let mut s = panos("http-panos.yaml");
+
+    assert!(sent(&s.step(&req("GET", "/", "", json!({})))).contains("Location: /php/login.php"));
+    assert!(sent(&s.step(&req("GET", "/php/login.php", "", json!({})))).contains("name=\"passwd\""));
+    for _ in 0..2 {
+        let o = s.step(&req("POST", "/php/login.php", "", creds.clone()));
+        assert_eq!(auth(&o), Some(false));
+        assert!(sent(&o).contains("Invalid username or password"));
+    }
+    let o = s.step(&req("POST", "/php/login.php", "", creds.clone()));
+    assert_eq!(
+        (auth(&o), o.tags.clone()),
+        (Some(true), vec!["auth_success".to_string()])
+    );
+    let cookie = json!({ "headers": "cookie: PHPSESSID=k3j9d2qv8m1f0r7t5c4b6n8p2a\n" });
+    assert!(sent(&s.step(&req("GET", "/", "", cookie))).contains("PA-3220"));
+
+    let keygen = "type=keygen&user=admin&password=admin";
+    assert!(sent(&s.step(&req("GET", "/api/", keygen, json!({})))).contains("Invalid Credential"));
+    assert!(sent(&s.step(&req("GET", "/api/", keygen, json!({})))).contains("Invalid Credential"));
+    assert!(sent(&s.step(&req("GET", "/api/", keygen, json!({})))).contains("<key>LUFRPT"));
+
+    let o = s.step(&req("GET", "/global-protect/prelogin.esp", "", json!({})));
+    assert_eq!(o.tags, ["globalprotect_probe"]);
+    assert!(sent(&o).contains("<prelogin-response>"));
+
+    let o = s.step(&req(
+        "GET",
+        "/php/x.php",
+        "",
+        json!({ "headers": "x-pan-authcheck: off\n" }),
+    ));
+    assert_eq!(o.tags, ["auth_bypass_probe"]);
+    assert_eq!(
+        s.step(&req("GET", "/unauth/%252e%252e/php/a.php", "", json!({})))
+            .tags,
+        ["path_traversal"]
+    );
+}
